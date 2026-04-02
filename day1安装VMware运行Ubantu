@@ -1,0 +1,36 @@
+在 < 开发板配套资料>02_ 开发工具\ 【Windows 】VMwareWorkstation 安装包 中，
+VMWare 安装软件是：VMware-workstation-full-16.2.3-19376536.exe。
+
+  VMware = 虚拟机软件
+在你的 Windows / Mac / Linux 电脑上，虚拟出 N 台独立电脑
+每台虚拟电脑都可以装自己的系统：Windows、Linux、Ubuntu、CentOS、macOS
+互相完全隔离：虚拟机里中毒、搞坏系统，不影响你真实电脑
+
+
+  VMware 有什么用？（你最常用的 5 大场景）
+1. 学习 Linux / 其他系统（最适合你）
+不用格式化、不用双系统、不用买新电脑
+在 Windows 里直接装 Ubuntu、CentOS 练手
+搞坏了直接删虚拟机，本机毫发无损
+2. 软件测试 / 多环境开发
+同一台电脑同时跑：
+Windows 11 + Windows 7 + Ubuntu + Kali Linux
+测试软件兼容性、跑不同开发环境、不怕冲突
+3. 安全隔离、防病毒
+打开危险文件、病毒、钓鱼网站
+在虚拟机里运行，中毒了直接删掉虚拟机即可
+4. 多系统同时用
+Mac 想跑 Windows 软件 → 用 VMware Fusion
+Windows 想跑 Linux 服务器 → 用 VMware Workstation
+5. 企业服务器（数据中心）
+一台物理服务器虚拟出几十台虚拟服务器
+省钱、省电、省机房、好管理
+
+  
+
+下载、解压 Ubuntu 映像文件
+  
+
+
+  第一次启动 Ubuntu 时，选择默认的“我已复制该虚拟机”，启动后输
+入密码“123456”回车即可登录
