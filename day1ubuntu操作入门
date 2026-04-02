@@ -1,0 +1,52 @@
+用搜索框打开终端
+我们要输入各种命令，需要先打开终端。
+点击 Ubuntu 桌面左上角图标进入搜索框，输入“term”可以弹出终端
+“Terminal”程序 
+
+  在桌面或者在文件浏览器的任何目录下右键鼠标后在弹出的菜单栏中选择“Open in Terminal
+  Ubuntu 和 和 Windows 的最大差别：目录
+ 
+  Windows 下某个文件的绝对路径以盘符开始，比如：
+C:\abc\def\hello.txt
+这是在 C 盘的 abc 目录下，有 def 子目录；而 def 中有 hello.txt 文件。
+Ubuntu 中，以树状结构表示文件夹与文件，没有盘符的概念。比如：
+/abc/def/hello.txt
+
+
+  
+  Ubuntu 中的目录遵循 FHS 标准
+  Ubuntu 中的目录遵循 FHS 标准(Filesystem Hierarchy Standard，文件系统层次标
+准)。它定义了文件系统中目录、文件分类存放的原则、定义了系统运行所需的最小文件、目
+录的集合，并列举了不遵循这些原则的例外情况及其原因。FHS 并不是一个强制的标准，但是
+大多的 Linux、Unix 发行版本遵循 FHS 。
+
+  
+
+  bin	所有用户都可以使用的、基本的命令
+boot	启动文件，比如内核等
+dev	设备文件，Linux 特有的
+etc	配置文件
+home	家目录
+├─ book：用户 book 的家目录
+lib	库
+media	插上 U 盘等外设时会挂载到该目录下
+mnt	用来挂载其他文件系统
+opt	Optional，可选的程序
+proc	用来挂载虚拟的 proc 文件系统，可以查看各进程 (process) 的信息
+root	root 用户的家目录
+sbin	基本的系统命令，系统管理员才能使用
+sys	用来挂载虚拟的 sys 文件系统，可以查看系统信息：比如设备信息
+tmp	临时目录，存放临时文件
+usr	Unix Software Resource，存放可分享的与不可变动的的数据
+├─ bin：绝大部分的用户可使用指令都放在这里 (与开机无关)，/bin 中的命令跟开机有关
+├─ games：游戏
+├─ include：头文件
+├─ lib：库
+├─ local：系统管理员在本机自行安装、下载的软件
+├─ sbin：非系统正常运作所需要的系统命令
+├─ share：放置共享文件的地方，比如 /usr/share/man 里存放帮助文件
+├─ src：源码
+var	主要针对常态性变动的文件，包括缓存 (cache)、log 文件等
+
+
+  
