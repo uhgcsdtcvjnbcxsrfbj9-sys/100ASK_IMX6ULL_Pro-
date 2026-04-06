@@ -1,0 +1,127 @@
+在 C 源文件中它的编码方式是 GB2312 还是 UTF-8？编译出
+的可执行程序，其中的汉字编码方式是 GB2312 还是 UTF-8？
+
+  我们编写 C 程序时，可以使用 ANSI 编码，或是 UTF-8 编码；在编译程序时，
+可以使用以下的选项告诉编译器：
+-finput-charset=GB2312
+-finput-charset=UTF-8
+
+  字符串由ASCII 字符A + 汉字啊组成，源文件必须用ANSI（GB2312/GBK）编码保存，这是输出结果的前提。
+
+  我们编写 C 程序时，可以使用 ANSI 编码，或是 UTF-8 编码；在编译程序时， 可以使用以下的选项告诉编译器：
+-finput-charset=GB2312
+-finput-charset=UTF-8
+如果不指定“-finput-charset”，GCC 就会默认 C 程序的编码方式为 UTF-
+8，即使你是以 ANSI 格式保存，也会被当作 UTF-8 来对待。
+对于编译出来的可执行程序，可以指定它里面的字符是以什么方式编码，可
+以使用以下的选项编译器：
+-fexec-charset=GB2312
+-fexec-charset=UTF-8
+如果不指定“-fexec-charset”，GCC 就会默认编译出的可执行程序中字符
+的编码方式为 UTF-8。
+如果“-finput-charset”与“-fexec-charset”不一样，编译器会进行
+格式转换。
+
+汉字点阵显示实验、
+打开 汉字库文件
+4787 fd_hzk16 = open("HZK16", O_RDONLY);
+4788 if (fd_hzk16 < 0)
+4789 {
+4790 printf("can't open HZK16\n");
+4791 return -1;
+4792 }
+4793 if(fstat(fd_hzk16, &hzk_stat))
+4794 {
+4795 printf("can't get fstat\n");
+4796 return -1;
+4797 }
+4798 hzkmem = (unsigned char *)mmap(NULL , hzk_stat.st_size, PROT_READ, MAP_SHARED, fd_hzk16, 0);//把 HZK16 汉字字库文件，直接 “映射” 到进程的内存里，让你像读数组一样读字库，速度极快！
+4799 if (hzkmem == (unsigned char *)-1)
+4800 {
+4801 printf("can't mmap for hzk16\n");
+4802 return -1;
+4803 }
+fd_hzk16
+是一个文件描述符
+代表你已经用 open () 打开的 HZK16 字库文件
+相当于文件的 “身份证号”
+② &hzk_stat
+是一个 struct stat 类型结构体 的地址
+系统会把文件的信息全部填到这个结构体里
+你之后就能从里面读文件大小、修改时间等
+③ fstat()
+系统函数
+作用：根据文件描述符，读取文件状态信息
+3. 这个函数执行完后，你能拿到什么？
+最常用、最重要的就是：hzk_stat.st_size
+ mmap( )
+内存映射函数，Linux 系统核心函数
+作用：把文件 → 映射到内存地址
+之后你不用 read /write，直接用指针读文件内容
+2. NULL
+让系统自动选择合适的内存地址
+你不用自己指定，填 NULL 最安全
+3. hzk_stat.st_size
+映射的文件大小（前面 fstat 获取到的字库总大小）
+告诉系统：我要把整个 HZK16 文件映射进内存
+4. PROT_READ
+内存保护权限
+PROT_READ = 只允许读
+我们只查字库，不需要写，所以用这个
+5. MAP_SHARED
+映射模式：共享映射
+表示：内存和文件是同步的
+（我们只读，所以这个模式最稳定）
+6. fd_hzk16
+已经打开的 HZK16 文件描述符
+mmap 靠它找到要映射的文件
+7. 0
+文件偏移量
+从文件第 0 个字节开始映射（映射整个文件）
+  8. (unsigned char *) 强制类型转换
+mmap 默认返回 void*
+我们要按字节读取汉字点阵
+所以强转成 unsigned char*，方便逐字节操作
+9. hzkmem
+最终得到的 映射内存首地址
+你可以把它理解成：
+plaintext
+
+
+编写显示汉字的函数
+核心函数是 void lcd_put_chinese(int x, int y, unsigned char
+*str)，它在 LCD 的(x,y)位置处显示汉字字符 str，str[0]中保存区码、str[1]
+中保存位码 hzkmem[索引] = 字库文件里对应位置的字节数据
+
+
+  编译 程序
+编译命令：
+arm-buildroot-linux-gnueabihf-gcc -o show_chinese show_chinese.c
+注意：不同的板子，编译工具的前缀可能不一样。
+注意：使用上述命令时 show_chinese.c 的编码格式必须是 ANSI(GB2312)，否
+则编译时需要指定“-fexec-charset=GB2312”。
+
+
+  终极直白解释：为什么写好 .c 代码后，必须这么编译、必须注意编码？
+我用你能立刻听懂的话，把原理 + 为什么必须这样做讲透。
+一、先回答你最核心的问题
+为什么不能直接 gcc，必须用 arm-xxx-gcc 编译？
+因为：
+你的代码跑在 ARM 开发板上（如 IMX6ULL），不是电脑上！
+你的电脑是 x86/x86_64 架构
+开发板是 ARM 架构
+两者指令集完全不兼容，就像：
+给美国人写的英语书
+不能直接给中国人看
+必须翻译！
+arm-buildroot-linux-gnueabihf-gcc
+就是 ARM 架构的专用翻译器（交叉编译器）
+作用：
+把你电脑上写的 C 代码 → 编译成 ARM 开发板能运行的程序
+
+为什么 .c 文件必须是 ANSI (GB2312) 编码？
+因为你用的是 HZK16 汉字点阵字库！
+HZK16 字库 只认 GB2312 编码
+
+  一定会要注意编码
+  
