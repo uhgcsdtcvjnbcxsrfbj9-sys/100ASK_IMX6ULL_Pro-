@@ -1,0 +1,37 @@
+互斥量加锁/
+  #include <pthread.h>
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+成功：返回 0
+
+lock 函数与 unlock 函数分别为加锁解锁函数，只需要传入已经初始化好的 pthread_mutex_t 互斥量指针。成功后会返回 0
+  当某一个线程获得了执行权后，执行 lock 函数，一旦加锁成功后，其余线
+程遇到 lock 函数时候会发生阻塞，直至获取资源的线程执行 unlock 函数后。
+unlock 函数会唤醒其他正在等待互斥量的线程
+
+  在使用互斥量的时候，尤其要注意使用 pthread_cancel 函数，防止发生死锁现象
+  线程如果【拿着锁的时候被杀死】，锁会永远锁死 → 整个程序卡死 = 死锁！
+pthread_cancel 的作用就是 强行杀死线程。
+如果不注意使用规范，100% 会触发死锁。
+
+  互斥量加锁（非阻塞）
+#include <pthread.h>
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+该函数同样也是一个线程加锁函数，但该函数是非阻塞模式通过返回值来
+判断是否加锁成功，用法与上述阻塞加锁函数一致
+阻塞模式（pthread_mutex_lock）
+拿不到锁 → 原地死等，一直等到拿到为止（啥也不干，卡住不动）
+非阻塞模式（pthread_mutex_trylock）
+拿不到锁 → 不等！直接返回，告诉你拿不到（程序继续跑，不卡住）
+
+
+  
+  互斥量销毁
+#include <pthread.h>
+int pthread_mutex_destory(pthread_mutex_t *mutex);
+成功：返回 0
+pthread_join(tid1,NULL);// 主线程在这里停下来，一直等线程 1 跑完、结束、死掉，再把它的资源回收掉，主线程才继续往后走。
+
+
+
+  
