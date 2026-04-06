@@ -1,0 +1,41 @@
+条件变量时一种同步机制，用来通知其他线程条件满足了。一般是用来通知对方共享数据的状态信息，因此条件变量时结合互斥量来使用的。
+  
+  创建和销毁条件变量
+函数原型如下：
+#include <pthread.h>
+// 初始化条件变量
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+int pthread_cond_init(pthread_cond_t *cond, pthread_condattr_t *cond_attr);//cond_at
+tr 通常为 NULL
+// 销毁条件变量
+int pthread_cond_destroy(pthread_cond_t *cond);
+这些函数成功时都返回 0
+
+  条件变量：等待 “某个条件成立”，用于线程间同步。
+信号量：控制 “最多多少个线程同时运行”，用于限流 / 互斥。
+
+
+  等待条件变量
+函数原型如下：
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+这需要结合互斥量一起使用，示例代码如下：
+pthread_mutex_lock(&g_tMutex);
+// 如果条件不满足则，会 unlock g_tMutex
+// 条件满足后被唤醒，会 lock g_tMutex
+pthread_cond_wait(&g_tConVar, &g_tMutex);
+/* 操作临界资源 */
+pthread_mutex_unlock(&g_tMutex);
+
+
+通知条件变量
+函数原型如下：
+int pthread_cond_signal(pthread_cond_t *cond);
+pthread_cond_signal 函数只会唤醒一个等待 cond 条件变量的线程，示
+例代码如下：
+pthread_cond_signal(&g_tConVar);‘’
+
+
+
+
+
+  
