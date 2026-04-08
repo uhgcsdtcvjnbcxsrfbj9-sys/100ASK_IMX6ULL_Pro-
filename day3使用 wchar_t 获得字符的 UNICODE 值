@@ -1,0 +1,62 @@
+ #include <stdio.h>
+02 #include <string.h>
+03 #include <wchar.h>
+04
+05 int main( int argc, char** argv)
+06 {
+07 wchar_t *chinese_str = L"中 中 gif";
+08 unsigned int *p = (wchar_t *)chinese_str;
+09 int i;
+10
+11 printf("sizeof(wchar_t) = %d, str's Uniocde: \n", (int)sizeof(wchar_t));
+12 for (i = 0; i < wcslen(chinese_str); i++)
+13 {
+14 printf("0x%x ", p[i]);
+15 }
+16 printf("\n");
+17
+18 return 0;
+19 }}
+
+1 #include <stdio.h>      // 输入输出，用 printf
+02 #include <string.h>     // 字符串函数
+03 #include <wchar.h>      // 宽字符（支持中文等Unicode）专用头文件
+普通 char 存不下中文
+wchar_t 叫宽字符，专门存中文、日文、韩文等 Unicode 字符
+05 int main( int argc, char** argv)
+06 {
+主函数，程序入口。
+07 wchar_t *chinese_str = L"中 中 gif";
+最关键一行！
+wchar_t *：定义一个宽字符串指针
+L"..."：L 代表宽字符字符串，告诉编译器：这里面有中文，要用 Unicode 存！
+内容：中 中 gif → 两个中文 + 两个空格 + g i f
+08 unsigned int *p = (wchar_t *)chinese_str;
+把宽字符串地址，强制转换成 unsigned int*
+目的：方便逐个取出每个字符的编码值
+09 int i;
+定义循环变量。
+11 printf("sizeof(wchar_t) = %d, str's Unicode: \n", (int)sizeof(wchar_t));
+打印：
+wchar_t 占几个字节（Linux 下是 4 字节）
+提示后面输出的是 Unicode 编码
+12 for (i = 0; i < wcslen(chinese_str); i++)
+wcslen()：专门给宽字符串求长度（对应普通字符串的 strlen）
+循环：逐个取出每个字符
+c
+运行
+14 printf("0x%x ", p[i]);
+打印每个字符的 Unicode 编码（十六进制）
+18 return 0;
+19 }
+程序结束。
+运行结果是什么？（你一定会看到这个）
+plaintext
+sizeof(wchar_t) = 4, str's Unicode:
+0x4e2d 0x20 0x4e2d 0x20 0x67 0x69 0x66
+逐个解释这些编码是什么
+0x4e2d → “中”
+0x20 → 空格
+0x67 → g
+0x69 → i
+0x66 → f
