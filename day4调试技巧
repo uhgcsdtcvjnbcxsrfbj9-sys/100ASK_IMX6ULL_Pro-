@@ -1,0 +1,80 @@
+、核心操作：如何找到我的设备？
+  我们在开发板上调试驱动时，第一步就是确认：驱动加载成功了吗？系统生成 event 节点了吗？
+
+  查看所有输入设备节点
+命令：ls /dev/input/* -l
+作用：查看 /dev/input/ 下的设备文件（event0, event1...）。
+看到的内容：
+crw-rw---- 1 root input 13, 64 Feb 7 15:51 event0
+crw-rw---- 1 root input 13, 65 Feb 7 15:51 event1
+重点：主设备号是 13，次设备号递增。
+注意：也可能直接在 /dev/ 下看到 event0，路径不同但功能一样。
+2. 精准定位：到底哪个 event 对应我的硬件？
+命令：cat /proc/bus/input/devices
+作用：这是最核心的调试命令！它把系统里所有输入设备的详细信息都列出来了，包括设备名、支持的事件类型、对应的 event 节点。
+看图中的例子（红框标注）：
+触摸屏：
+Name: "Goodix Capacitive TouchScreen" (设备名)
+Handlers: kbd event0 (关键：它对应的设备节点是 /dev/input/event0)
+GPIO 按键：
+Name: "joystick" (设备名，自定义的)
+Handlers: kbd event1 (关键：它对应的设备节点是 /dev/input/event1)
+结论：如果你想测试你的自定义按键，就打开 /dev/input/event1。
+
+
+查看所有输入设备节点
+命令：ls /dev/input/* -l
+作用：查看 /dev/input/ 下的设备文件（event0, event1...）。
+看到的内容：
+crw-rw---- 1 root input 13, 64 Feb 7 15:51 event0
+crw-rw---- 1 root input 13, 65 Feb 7 15:51 event1
+重点：主设备号是 13，次设备号递增。
+注意：也可能直接在 /dev/ 下看到 event0，路径不同但功能一样。
+2. 精准定位：到底哪个 event 对应我的硬件？
+命令：cat /proc/bus/input/devices
+作用：这是最核心的调试命令！它把系统里所有输入设备的详细信息都列出来了，包括设备名、支持的事件类型、对应的 event 节点。
+看图中的例子（红框标注）：
+触摸屏：
+Name: "Goodix Capacitive TouchScreen" (设备名)
+Handlers: kbd event0 (关键：它对应的设备节点是 /dev/input/event0)
+GPIO 按键：
+Name: "joystick" (设备名，自定义的)
+Handlers: kbd event1 (关键：它对应的设备节点是 /dev/input/event1)
+结论：如果你想测试你的自定义按键，就打开 /dev/input/event1。
+
+
+PPT 里给了一个例子：B: EV=b，让我们拆解它。
+1. 第一步：转成二进制
+EV=b：b 是十六进制，等于二进制 1011。
+每一位代表一种事件类型（对应 evbit）：
+bit 0 (最右边)：EV_SYN (同步) -> 1 (支持)
+bit 1：EV_KEY (按键) -> 1 (支持)
+bit 2：EV_REL (相对坐标) -> 0 (不支持)
+bit 3：EV_ABS (绝对坐标) -> 1 (支持)
+bit 4+：未显示。
+结论：这个设备支持 同步 + 按键 + 绝对坐标（比如触摸屏）。
+2. 第二步：理解复杂位图（进阶）
+PPT 举了一个更复杂的例子：B: ABS=2658000 3。
+原理：位图很长，所以用多组十六进制数字表示（高位在前，低位在后）。
+计算：
+第一组 2658000
+第二组 3
+组合起来是一个 64 位的二进制数。
+解读：系统会把这些位和 input-event-codes.h 里的宏对比。
+对应宏：
+0x00 = ABS_X
+0x01 = ABS_Y
+0x2f = ABS_MT_SLOT
+0x30 = ABS_MT_TOUCH_MAJOR
+...
+含义：这行代码告诉你，这个触摸屏具体支持哪些触摸坐标信息（X 轴、Y 轴、多点触控位置等）。
+四、总结（调试口诀）
+当你写完输入驱动，在开发板上验证时，按这个顺序操作：
+加载驱动 (insmod xxx.ko)
+查节点：运行 ls /dev/input/* -l，看有没有新的 event 生成。
+看信息：运行 cat /proc/bus/input/devices。
+找你的设备名 (N)。
+确认 Handlers (H) 里的 event 号（比如 event1）。
+检查 B 位图：确认支持的事件类型对不对（比如按键驱动要有 EV_KEY）。
+测数据：用 evtest 工具选择那个 event 号，按按键看有没有输出。
+只要做到了这些，你的输入驱动就一定成功了！
