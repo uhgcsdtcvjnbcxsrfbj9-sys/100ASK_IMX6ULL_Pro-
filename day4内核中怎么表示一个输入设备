@@ -1,0 +1,156 @@
+struct input_dev {
+    const char *name;
+    const char *phys;
+    const char *uniq;
+    struct input_id id;
+
+    unsigned long propbit[BITS_TO_LONGS(INPUT_PROP_CNT)];
+
+    unsigned long evbit[BITS_TO_LONGS(EV_CNT)];//告诉内核：我的这个输入设备，支持哪几类事件
+    unsigned long keybit[BITS_TO_LONGS(KEY_CNT)];
+    unsigned long relbit[BITS_TO_LONGS(REL_CNT)];
+    unsigned long absbit[BITS_TO_LONGS(ABS_CNT)];
+    unsigned long mscbit[BITS_TO_LONGS(MSC_CNT)];
+    unsigned long ledbit[BITS_TO_LONGS(LED_CNT)];
+    unsigned long sndbit[BITS_TO_LONGS(SND_CNT)];
+    unsigned long ffbit[BITS_TO_LONGS(FF_CNT)];
+    unsigned long swbit[BITS_TO_LONGS(SW_CNT)];
+};
+
+
+
+一、先搞懂：input_dev 到底是什么？
+在 Linux 内核里，每一个输入设备（比如按键、键盘、触摸屏、鼠标、游戏手柄），都用一个 struct input_dev 结构体来表示。
+它就像输入设备的「身份证」，记录了设备的所有属性、支持的事件类型、上报能力等。
+驱动开发的核心步骤之一，就是分配、初始化、注册这个结构体，让内核识别你的输入设备。
+头文件：#include <linux/input.h>，所有输入子系统相关的定义都在这里。
+
+  1. 基础信息字段（设备身份信息）
+const char *name;   // 设备名，比如 "imx6ull-key"，会在 /sys/class/input/inputX/name 中显示
+const char *phys;   // 设备物理路径，比如 "gpio-keys/input0"，用于内核内部识别
+const char *uniq;   // 设备唯一ID，一般USB/蓝牙设备用，嵌入式GPIO按键通常设为NULL
+struct input_id id; // 设备ID，包含总线类型、厂商、产品、版本号，用于匹配驱动
+作用：给内核和用户空间提供设备的身份信息，方便系统识别和管理。
+实战：写按键驱动时，name 一般填自定义的设备名，phys/uniq 可以不填，id 用于和设备树匹配。
+
+
+  1. 先拆成 3 个部分看
+unsigned long propbit[ BITS_TO_LONGS( INPUT_PROP_CNT ) ];
+INPUT_PROP_CNT：设备属性总数量（比如 5 种、10 种）
+BITS_TO_LONGS(n)：计算需要多少个 unsigned long 才能存下 n 个 bit
+propbit[]：一个数组，用来存位标记
+2. 核心原理：用 1 个 bit 表示 1 个功能
+Linux 内核不用 int supported = 1 这种方式，而是：
+1 个 bit = 1 个功能是否支持
+bit = 1 → 支持
+bit = 0 → 不支持
+比如：
+bit 0 → 是否是触摸屏
+bit 1 → 是否是鼠标
+bit 2 → 是否有按键
+...
+这样1 个字节（8 bit）就能表示 8 个功能，超级省内存！
+
+
+  你可以把它理解成：
+一排开关，每一个开关代表一个功能，打开 = 1，关闭 = 0
+propbit 就是开关面板
+INPUT_PROP_CNT 是开关总数
+BITS_TO_LONGS 计算需要几块开关面板
+
+
+  
+
+  unsigned long propbit[2];
+表示：
+数组有 2 个元素
+每个元素 64 bit
+总共 128 个 bit
+可以标记 128 种设备属性
+
+  
+  
+3. BITS_TO_LONGS 是什么？
+它是内核宏，作用：
+计算：存 N 个 bit 需要多少个 unsigned long
+举例（64 位系统）：
+1 个 unsigned long = 64 bit
+如果有 70 个属性 → 需要 2 个 long
+如果有 10 个属性 → 需要 1 个 long
+  设备属性位掩码 propbit
+unsigned long propbit[BITS_TO_LONGS(INPUT_PROP_CNT)];
+本质：一个位掩码数组，用每一个 bit 来表示设备的一个属性。
+BITS_TO_LONGS(N)：Linux 内核的宏，用来计算存储 N 个 bit 需要多少个unsigned long（比如 32 位系统 1 个 long 存 32bit，64 位存 64bit），保证跨平台兼容。
+常见属性：
+INPUT_PROP_POINTER：指针设备（比如鼠标）
+INPUT_PROP_DIRECT：直接输入设备（比如触摸屏，直接对应屏幕坐标）
+INPUT_PROP_BUTTONPAD：按钮式设备
+作用：告诉系统这个设备的类型特性，上层应用可以根据属性做不同处理。
+
+
+  3. 核心：事件类型与能力位掩码（重点！）
+这部分是input_dev的灵魂，决定了设备能上报什么事件，完全对应你上一张图的type/code/value三要素。
+3.1 evbit：支持的事件类型（对应 type）
+unsigned long evbit[BITS_TO_LONGS(EV_CNT)];  // 支持哪类事件？key/rel/abs ?
+作用：用每一个 bit 标记设备支持的type（事件类型）。
+比如：
+置位EV_KEY → 设备支持按键事件（能上报按键按下 / 松开）
+置位EV_REL → 支持相对坐标事件（鼠标移动）
+置位EV_ABS → 支持绝对坐标事件（触摸屏）
+置位EV_SYN → 支持同步事件（必须置位，所有输入设备都需要）
+实战：写按键驱动，只需要置位EV_KEY和EV_SYN。
+
+  
+3.2 keybit：支持的按键（对应 code，按键类）
+unsigned long keybit[BITS_TO_LONGS(KEY_CNT)];  // 支持按键的话，支持哪些按键
+作用：当evbit置位了EV_KEY后，用这个数组的 bit 标记设备支持的具体按键code。
+比如：
+置位KEY_A → 设备能上报 A 键
+置位KEY_ENTER → 能上报回车键
+置位KEY_POWER → 能上报电源键
+实战：GPIO 按键驱动，只需要置位你硬件对应的按键（比如KEY_A/KEY_BACK）。
+
+  
+3.3 relbit：支持的相对位移（对应 code，鼠标类）
+unsigned long relbit[BITS_TO_LONGS(REL_CNT)];  // 支持相对位移的话，支持哪些
+作用：当evbit置位了EV_REL后，标记支持的相对坐标事件code。
+常见：REL_X/REL_Y（鼠标 X/Y 轴位移）、REL_WHEEL（鼠标滚轮）。
+适用：鼠标、触摸板等「相对位移」设备。
+  
+3.4 absbit：支持的绝对坐标（对应 code，触摸屏类）
+unsigned long absbit[BITS_TO_LONGS(ABS_CNT)];  // 支持绝对位移的话，支持哪些
+作用：当evbit置位了EV_ABS后，标记支持的绝对坐标事件code。
+常见：ABS_X/ABS_Y（触摸屏 X/Y 坐标）、ABS_PRESSURE（触摸压力）、ABS_MT_POSITION_X（多点触控 X 坐标）。
+适用：触摸屏、摇杆、游戏手柄等「绝对位置」设备。
+  
+3.5 其他事件位掩码（了解即可）
+unsigned long mscbit[BITS_TO_LONGS(MSC_CNT)];  // 杂项事件（MSC_*），比如扫描码
+unsigned long ledbit[BITS_TO_LONGS(LED_CNT)];  // LED事件（LED_*），比如键盘大小写灯
+unsigned long sndbit[BITS_TO_LONGS(SND_CNT)];  // 声音事件（SND_*），比如蜂鸣器
+unsigned long ffbit[BITS_TO_LONGS(FF_CNT)];    // 力反馈事件（FF_*），游戏手柄震动
+unsigned long swbit[BITS_TO_LONGS(SW_CNT)];    // 开关事件（SW_*），比如翻盖检测
+这些是扩展事件，嵌入式 Linux 按键 / 触摸屏驱动一般用不到，不用置位。
+
+
+  EV_CNT 是什么？
+Linux 输入子系统一共定义了多少种事件类型。
+比如：
+EV_KEY　按键事件
+EV_REL　鼠标相对坐标
+EV_ABS　触摸屏绝对坐标
+EV_SYN　同步事件
+EV_MSC　杂项
+...
+EV_CNT 就是这些类型的总数。
+
+如果你写的是按键驱动
+你只需要支持：
+EV_KEY（按键）
+EV_SYN（同步）
+所以驱动里写：
+set_bit(EV_KEY, input_dev->evbit);  // 打开按键事件开关
+set_bit(EV_SYN, input_dev->evbit);  // 打开同步事件开关
+
+
+
+  
