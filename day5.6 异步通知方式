@@ -1,0 +1,301 @@
+所谓异步通知，就是 APP 可以忙自己的事，当驱动程序用数据时它会主动给
+APP 发信号，这会导致 APP 执行信号处理函数。
+仔细想想“发信号”，这只有 3 个字，却可以引发很多问题：
+⚫ 谁发：驱动程序发
+⚫ 发什么：信号
+⚫ 发什么信号：SIGIO
+⚫ 怎么发：内核里提供有函数
+⚫ 发给谁：APP，APP 要把自己告诉驱动
+⚫ APP 收到后做什么：执行信号处理函数
+⚫ 信号处理函数和信号，之间怎么挂钩：APP 注册信号处理函数
+
+
+ 异步（你忙你的，有事喊我）
+异步通知的核心：APP 正常干自己的活，完全不等待硬件。当硬件有数据时，驱动主动给 APP 发信号（SIGIO），APP 收到信号后，暂停当前任务，去处理硬件数据，处理完继续干自己的活。
+ 谁发信号？ → 驱动程序发
+硬件产生数据后，** 驱动程序（内核态）** 是唯一能给 APP 发信号的主体。
+硬件（按键 / 串口 / 传感器）产生数据 → 触发中断 → 驱动的中断处理函数被调用
+驱动把数据读到自己的缓冲区 → 主动给 APP 发SIGIO信号
+
+发什么信号？ → SIGIO（I/O 事件信号）
+Linux 里专门给 **I/O 事件（硬件数据就绪）** 定义的信号就是SIGIO，对应图 7.15 里的信号宏定义（编号 29）。
+作用：告诉 APP「这个设备有数据了，快来读」
+类比：孩子喊「妈妈！」，这个喊的动作就是SIGIO信号
+
+内核提供了专门的函数（比如kill_fasync()），驱动调用这个函数，就能给指定的 APP 发SIGIO信号。
+发给谁？ → APP 要把自己告诉驱动
+驱动不能随便发信号，必须知道「发给哪个 APP 进程」。
+APP 需要把自己的 ** 进程 ID（PID）** 告诉驱动，这样驱动才知道信号发给谁。
+
+APP 收到后做什么？ → 执行信号处理函数
+APP 收到SIGIO信号后，会暂停当前正在执行的代码，跳转到提前注册好的「信号处理函数」里，执行读数据、处理事件的逻辑，处理完再回到原来的代码继续执行。
+
+信号和处理函数怎么挂钩？ → APP 注册信号处理函数
+APP 必须提前告诉内核：「收到SIGIO信号时，去执行哪个函数」，这个过程叫信号注册，用signal()函数完成（对应图 7.16）。
+
+
+
+APP 要做的 3 件关键事（图中最后 3 个问题）
+要让异步通知正常工作，APP 必须完成 3 个核心配置，缺一不可：
+1. 告诉内核：哪个驱动给我发信号？ → 打开设备节点
+APP 必须先open要监听的硬件设备（比如/dev/input/event0），拿到文件描述符fd。
+只有打开了设备，内核才知道「这个 APP 要监听哪个硬件」。
+2. 告诉驱动：发给我这个进程！ → 把 PID 告诉驱动
+用fcntl()函数，把 APP 的进程 ID（getpid()）绑定到设备fd上：
+fcntl(fd, F_SETOWN, getpid());
+作用：告诉内核「这个fd对应的设备，发 SIGIO 信号时，发给当前进程」
+类比：孩子记住了妈妈的房间号，喊的时候只喊这个房间的妈妈。
+3. 告诉驱动：我要收信号！ → 开启异步通知（FASYNC）
+用fcntl()给设备fd设置O_ASYNC标志，使能异步通知：
+int flags = fcntl(fd, F_GETFL, 0);
+fcntl(fd, F_SETFL, flags | O_ASYNC);
+作用：告诉驱动「我要接收 SIGIO 信号，有数据就发」
+类比：妈妈告诉孩子「醒了就喊我，别憋着」
+
+
+内核 = 整个系统的管理者
+驱动 = 专门负责某一个硬件的管理者
+就像：
+内核 = 公司总经理
+驱动 = 每个部门的经理（硬件经理）
+APP = 员工
+硬件 = 设备（打印机、按键、串口、传感器……）
+三、详细对比（必须记下来）
+1. 权限不同（最关键）
+内核：最高权限
+可以操作任何硬件、修改内存、管理进程、开关中断。
+驱动：有限权限
+只能处理一个硬件，必须通过内核接口才能访问硬件。
+为什么？
+因为 APP 没有权限，驱动也没有全部权限，
+只有内核（操作系统内核）拥有硬件访问权。
+2. 职责不同
+内核负责：
+管理内存
+管理进程
+管理 CPU 时间片
+管理文件系统
+处理中断
+提供系统调用（APP 只能通过内核才能干活）
+驱动负责：
+初始化硬件
+控制硬件寄存器
+处理硬件中断
+把硬件的数据传给内核
+让内核知道硬件发生了什么事件
+一句话：
+内核负责 “系统管理”，驱动负责 “硬件管理”。
+
+
+
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <linux/input.h>
+
+int fd; // 全局设备fd，信号处理函数要用
+
+// 1. 信号处理函数：收到SIGIO时执行
+void sigio_handler(int signo) {
+    struct input_event ev;
+    // 收到信号，说明驱动有数据，直接读
+    while (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
+        printf("收到按键事件: type=0x%x, code=0x%x, value=0x%x\n",
+               ev.type, ev.code, ev.value);
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        printf("用法: %s /dev/input/eventX\n", argv[0]);
+        return -1;
+    }
+
+    // 2. 打开设备（步骤1：告诉内核哪个驱动发信号）
+    fd = open(argv[1], O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        perror("open 失败");
+        return -1;
+    }
+
+    // 3. 注册SIGIO信号处理函数（步骤6：挂钩信号和处理函数）
+    signal(SIGIO, sigio_handler);
+
+    // 4. 把当前进程PID告诉驱动（步骤4：发给谁）
+    fcntl(fd, F_SETOWN, getpid());
+
+    // 5. 开启异步通知（步骤3：使能FASYNC）
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_ASYNC);
+
+    // 6. APP正常干自己的活，完全不阻塞！
+    printf("APP正常运行，等待按键事件...\n");
+    while (1) {
+        // 这里可以放任何业务逻辑，比如数据处理、UI刷新
+        sleep(1);
+        printf("APP正在干自己的活...\n");
+    }
+
+    close(fd);
+    return 0;
+}
+
+stdio.h：提供 printf
+stdlib.h：提供 exit
+unistd.h：提供 open, read, close, sleep
+fcntl.h：提供 fcntl()，设置异步通知
+signal.h：提供 signal()，注册信号处理函数
+linux/input.h：输入设备结构体 input_event
+
+int fd;
+作用
+保存设备文件描述符。
+为什么要全局？
+因为 信号处理函数 sigio_handler 要用到 fd。
+信号处理函数不能传参，所以必须用全局变量。
+
+void sigio_handler(int signo) {
+作用
+硬件发来 SIGIO 信号时，自动跳到这里执行！
+原理
+这是异步通知的核心：
+APP 本来在干别的
+信号来了 → 被打断
+立刻执行这个函数
+执行完 → 回到原来的位置继续运行
+
+struct input_event ev;
+Linux 输入设备（按键 / 触摸屏 / 鼠标）
+所有事件都用这个结构体传递。
+里面包含：
+type ：事件类型（按键？触摸屏？）
+code ：哪个按键（如 KEY_ENTER）
+value：按下 / 抬起 / 滑动距离
+hile (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
+为什么 while？
+硬件可能一次发多个事件，必须全部读完。
+为什么 read 不会卡住？
+因为 open 时加了 O_NONBLOCK
+有数据 → 读
+没数据 → 返回 -1 → 退出循环
+原理
+SIGIO 信号 = 驱动缓冲区一定有数据
+所以 read 一定能读到。
+6. 打印事件
+c
+运行
+printf("收到按键事件: type=0x%x, code=0x%x, value=0x%x\n",
+       ev.type, ev.code, ev.value);
+打印硬件发生了什么：
+type=1 ：按键事件
+code=28：回车键
+value=1：按下
+value=0：松开
+7. main 函数开始
+c
+运行
+int main(int argc, char **argv) {
+argc：命令行参数个数
+argv：参数内容
+运行命令：./a.out /dev/input/event0
+8. 判断参数是否正确
+c
+运行
+if (argc != 2) {
+    printf("用法: %s /dev/input/eventX\n", argv[0]);
+    return -1;
+}
+必须传入设备名，否则报错。
+9. 打开设备（超级关键）
+c
+运行
+fd = open(argv[1], O_RDONLY | O_NONBLOCK);
+两个标志：
+O_RDONLY：只读
+O_NONBLOCK：非阻塞
+为什么必须 O_NONBLOCK？
+因为 信号处理函数里的 read 不能阻塞！
+阻塞会卡死系统。
+10. 判断打开失败
+c
+运行
+if (fd < 0) {
+    perror("open 失败");
+    return -1;
+}
+11. 注册信号处理函数（核心！）
+c
+运行
+signal(SIGIO, sigio_handler);
+作用
+告诉内核：
+收到 SIGIO 信号 → 调用 sigio_handler 函数
+这叫 信号绑定。
+12. 告诉驱动：信号发给我这个 APP
+c
+运行
+fcntl(fd, F_SETOWN, getpid());
+原理
+驱动不知道信号发给谁，
+所以 APP 必须把自己的 PID（进程 ID） 告诉驱动。
+13. 开启异步通知模式（最核心！）
+c
+运行
+int flags = fcntl(fd, F_GETFL, 0);
+fcntl(fd, F_SETFL, flags | O_ASYNC);
+作用
+给设备文件设置 O_ASYNC 标志。
+原理
+这个标志会 通知驱动：
+“我要开启异步通知，有数据请发 SIGIO 信号！”
+14. APP 正常运行，完全不阻塞
+c
+运行
+printf("APP正常运行，等待按键事件...\n");
+while (1) {
+    sleep(1);
+    printf("APP正在干自己的活...\n");
+}
+重点：
+这里没有 poll，没有 read，没有等待！
+APP 完全自由运行。
+异步的精髓：
+你忙你的，硬件有事主动喊你。
+15. 关闭设备（永远执行不到）
+c
+运行
+close(fd);
+return 0;
+🔥 整段代码背后的 核心原理（必须背）
+异步通知 = 硬件主动通知 APP，不需要 APP 查询
+流程：
+硬件产生数据
+驱动中断函数读取数据
+驱动 主动发 SIGIO 信号 给 APP
+APP 被打断 → 进入信号处理函数
+read 读取数据
+返回主程序继续运行
+
+ 4 个为什么（你一定会问）
+1. 为什么 open 要 O_NONBLOCK？
+因为信号处理函数里 read 不能阻塞。
+2. 为什么要 F_SETOWN？
+驱动必须知道 信号发给谁。
+3. 为什么要 O_ASYNC？
+告诉驱动 开启异步通知。
+4. 为什么信号来了一定有数据？
+因为 驱动只有在有数据时才发信号。
+🔥 最终总结（最关键）
+这段代码 = 异步通知模型
+APP 不查询、不等、不阻塞
+硬件 → 驱动 → 发信号 → APP 处理
+Linux 最高效、最优雅的硬件访问方式
+
+
+
+
+
