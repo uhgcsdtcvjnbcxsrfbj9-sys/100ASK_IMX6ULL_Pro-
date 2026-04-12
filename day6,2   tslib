@@ -1,0 +1,138 @@
+tslib 是一个触摸屏的开源库，可以使用它来访问触摸屏设备，可以给输入
+设 备 添 加 各 种 “ filter ” ( 过 滤 器 ， 就 是 各 种 处 理 ) ， 地 址 是 ：
+http://www.tslib.org/。
+编译 tslib 后，可以得到 libts 库，还可以得到各种工具：较准工具、测
+试工具。
+
+  专门给触摸屏（尤其是电阻屏）做 “数据清洗、校准、降噪、矫正” 的工具包。
+二、它解决什么问题？（核心作用）
+Linux 系统里，触摸屏直接读出来的原始数据是脏的、不准的、乱跳的：
+数据抖动
+点击漂移
+坐标不准
+按压噪声
+温度漂移
+线性误差
+tslib 就是帮你把这些脏数据变干净、变准确。
+
+  、tslib 最核心的功能：过滤器（filter）
+你看到的 filter（过滤器） 就是：
+对触摸数据做各种修正的小模块
+常见过滤器：
+均值滤波（去抖动）
+中位数滤波（去噪点）
+线性校准（矫正点击不准）
+旋转（屏幕旋转时修正坐标）
+压力阈值（过滤误触）
+
+
+  编译 tslib 后得到什么？
+编译完成后，你会得到两类东西：
+1. 库文件：libts.so
+应用程序用来读取触摸屏的标准库
+Qt、GUI、各种嵌入式程序想使用触摸屏，必须链接这个库。
+2. 各种工具（最实用！）
+ts_calibrate：触摸屏校准工具（点十字，解决点击不准）
+ts_test：触摸屏测试工具（画点、画线、测响应）
+ts_print：打印原始触摸数据
+ts_uinput：把触摸屏模拟成标准输入设备
+ts_finddev：找触摸屏设备
+
+
+  你在电脑 / 开发板上执行编译命令，把 tslib 的源代码（人能看懂的 C 代码） → 转换成 Linux 能运行的二进制文件（机器码），这个转换过程结束，就叫编译完成后
+这些工具不需要写代码，直接运行就能用！  
+
+
+  编译后你会得到两类核心文件，这就是它的意思：
+库文件 libts：给程序调用的 “触摸数据处理引擎”
+工具命令：ts_calibrate（校准）、ts_test（测试）等直接运行的小工具
+
+
+  编译 tslib 的完整真实代码 / 命令（嵌入式开发最常用）
+我直接给你能复制运行的标准编译流程，基于 Linux 开发板 / 虚拟机：
+1. 准备（下载源码）
+# 下载tslib源码
+git clone https://github.com/libts/tslib.git
+cd tslib
+2. 编译配置（指定安装路径）
+# 生成配置文件
+./autogen.sh
+# 配置：--prefix 是编译完成后文件存放的路径
+./configure --prefix=/usr/local/tslib
+3. 编译 + 安装（这一步执行完 = 编译完成后）
+# 编译（把源码变成二进制文件）
+make
+# 安装（把编译好的文件复制到指定目录）
+make install
+✅ 执行完 make install → 就是「编译完成后」
+此时 /usr/local/tslib 目录里就有了能用的文件！
+
+
+  编译完成后 = 电脑上生成了可以在开发板上运行的库 + 工具
+你只需要：
+交叉编译
+复制到开发板
+配置环境变量
+运行 ts_calibrate 和 ts_test'
+
+  必须用的工具：交叉编译器
+它的名字一般长这样：
+arm-linux-gnueabihf-gcc
+arm-linux-gnueabi-gcc
+arm-poky-linux-gnueabi-gcc
+不同开发板，用的版本不一样，但原理完全一样！
+
+
+
+  为什么要配置环境变量
+
+  配置环境变量，就是告诉系统 4 件事：
+触摸屏设备在哪？（/dev/input/event1）
+tslib 配置文件在哪？（ts.conf）
+tslib 插件 / 库在哪？
+屏幕显示设备在哪？
+不配置环境变量 → tslib 完全不知道怎么工作 → 直接报错、运行失败！
+我用最通俗、最接地气的方式给你讲明白👇
+一、环境变量到底是干嘛的？（比喻）
+你可以把 tslib 当成一个 “快递员”
+它的任务是：
+把触摸屏的坐标 → 处理干净 → 送给应用程序
+但快递员要干活，必须知道：
+去哪里取件？（触摸屏设备）
+去哪里找工具？（库、插件）
+按什么规则处理？（配置文件）
+送到哪里显示？（屏幕）
+环境变量 = 给快递员的 “地址清单”
+不配置 = 快递员迷路了 → 罢工、报错！
+
+  tslib 必须的 5 个环境变量，每个是什么意思？
+我一个一个给你讲人话：
+1. TSLIB_TSDEVICE
+告诉 tslib：触摸屏设备文件在哪
+export TSLIB_TSDEVICE=/dev/input/event1
+触摸屏在 Linux 里就是一个文件：/dev/input/eventx
+不告诉它，tslib 不知道读哪个设备
+2. TSLIB_CONFFILE
+告诉 tslib：配置文件在哪
+export TSLIB_CONFFILE=/usr/local/tslib/etc/ts.conf
+配置文件里写了：要不要去抖、要不要校准、要不要旋转
+不配置 → tslib 不知道用什么规则处理触摸数据
+3. TSLIB_PLUGINDIR
+告诉 tslib：滤波 / 校准插件在哪
+export TSLIB_PLUGINDIR=/usr/local/tslib/lib/ts
+去抖、线性校准、降噪 都是插件
+不配置 → tslib 找不到功能模块，等于残废
+4. TSLIB_FBDEVICE
+告诉 tslib：在哪个屏幕上显示校准界面
+export TSLIB_FBDEVICE=/dev/fb0
+运行 ts_calibrate 时，要在屏幕上画十字
+不配置 → 不知道在哪个屏画，直接报错
+5. LD_LIBRARY_PATH
+告诉系统：tslib 的库文件在哪
+export LD_LIBRARY_PATH=/usr/local/tslib/lib
+运行工具需要依赖 libts.so
+不配置 → 系统找不到库 → 报错：error while loading shared libraries
+
+  
+  
+  
