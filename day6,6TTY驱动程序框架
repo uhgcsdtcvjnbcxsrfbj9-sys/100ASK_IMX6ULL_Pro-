@@ -1,0 +1,104 @@
+Linux 支持上百种串口硬件（8250、imx_uart、s3c24xx、usbserial 等），如果每个硬件都自己实现一套完整的终端逻辑（行缓冲、终端控制、波特率配置、控制台、伪终端等），会出现：
+代码重复冗余，维护成本极高
+应用层接口不统一，不同串口操作逻辑不一致
+新硬件接入需要从零开发，效率极低
+2. 框架设计思想：分层解耦
+Linux TTY 驱动的核心设计：把「通用终端逻辑」和「硬件操作逻辑」彻底分离
+通用层（TTY 核心层 + 线路规程）：统一实现所有终端共有的逻辑（行编辑、终端控制、信号处理、控制台等），和硬件无关
+硬件层（TTY 驱动 /uart_driver）：只实现和具体硬件相关的操作（收发数据、配置波特率、中断处理等）
+应用层通过统一的/dev/ttyxxx文件接口操作，完全不用关心底层硬件
+
+
+  Linux TTY 驱动是一个4 层架构，从应用层到硬件层依次为：
+应用层（open/read/write/ioctl）
+    ↓
+1. TTY核心层（tty_core）
+    ↓
+2. 线路规程层（line discipline，n_tty）
+    ↓
+3. TTY驱动层（tty_driver / uart_driver）
+    ↓
+4. 硬件层（UART控制器/USB转串口/虚拟终端）
+
+
+. TTY 核心层（tty_core）：框架的「总调度室」
+位置：drivers/tty/tty_core.c
+核心作用：
+统一管理所有 TTY 设备（注册 / 注销 tty_driver，创建设备节点/dev/ttyxxx）
+对接 VFS 文件系统，把应用层的open/read/write/ioctl转发给对应层
+管理 TTY 结构体（struct tty_struct，每个终端的核心数据结构）
+处理终端的通用逻辑（进程控制、信号、控制台绑定等）
+
+
+  线路规程层（line discipline，ldisc）：终端的「数据处理器」
+位置：drivers/tty/ldisc/，最常用的是n_tty.c（标准终端规程）
+核心作用：
+规范模式（Canonical Mode）：处理行编辑（退格、回车、删除），缓冲一行数据再交给应用层
+原始模式（Raw Mode）：直接透传数据，不做任何处理（串口通信常用）
+处理终端特殊字符（Ctrl+C 中断、Ctrl+Z 挂起、Ctrl+S/XOFF 流控等）
+数据过滤、流控、超时处理
+核心逻辑：
+接收方向：硬件收到数据 → 线路规程处理 → 交给应用层
+发送方向：应用层发送数据 → 线路规程处理 → 交给硬件发送
+可替换性：可以根据需求替换不同的线路规程（如n_hdlc用于 PPP，n_gsm用于 GSM modem），默认用n_tty
+
+
+ TTY 驱动层（tty_driver /uart_driver）：硬件的「抽象层」
+这是框架的核心，分为通用 tty_driver和串口专用 uart_driver（嵌入式 99% 用 uart_driver）
+通用 tty_driver：用于非串口终端（如虚拟终端/dev/ttyx、伪终端/dev/pts/x）
+uart_driver：专门为 UART 硬件设计的抽象层，位置drivers/tty/serial/serial_core.c，是嵌入式串口驱动的核心
+核心作用：
+封装 UART 硬件的通用操作（收发、波特率配置、中断、DMA 等）
+对接 TTY 核心层和线路规程层，把上层请求转发给具体硬件
+管理 UART 端口（struct uart_port，每个 UART 控制器的实例）
+
+
+
+  . 硬件层：具体的 UART 控制器 / 设备
+对应实体：
+嵌入式 SoC 原生 UART（如 IMX6ULL 的 imx_uart、STM32 的 stm32_uart）
+标准 8250 串口（serial8250.c）
+USB 转串口（usbserial.c + 芯片驱动，如 ch341.c）
+虚拟终端 / 伪终端（纯软件模拟，无硬件）
+核心作用：
+实现uart_ops中的硬件操作函数（初始化、收发数据、配置波特率、中断处理）
+处理 UART 硬件中断，把收到的数据上报给 uart_driver
+控制 UART 硬件的发送 / 接收、流控、电源管理
+
+
+  . 应用层写数据（发送流程）
+plaintext
+应用层调用write(fd, buf, len)
+    ↓
+VFS文件系统 → TTY核心层（tty_write）
+    ↓
+线路规程层（n_tty_write）：处理流控、缓冲、特殊字符
+    ↓
+uart_driver层（uart_write）：把数据放到发送缓冲区
+    ↓
+硬件驱动（uart_ops->start_tx）：操作UART寄存器，逐位发送数据
+    ↓
+UART硬件（TX引脚）：输出串行比特流
+2. 应用层读数据（接收流程）
+UART硬件（RX引脚）：收到串行比特流，触发中断
+    ↓
+硬件驱动（uart_ops->handle_irq）：读取数据，上报给uart_driver
+    ↓
+uart_driver层（uart_insert_char）：把数据放到接收缓冲区
+    ↓
+线路规程层（n_tty_receive_buf）：处理行编辑、缓冲、特殊字符
+    ↓
+TTY核心层（tty_read）：把数据交给VFS
+    ↓
+应用层调用read(fd, buf, len)，拿到数据
+
+
+
+  
+
+  
+  
+  
+  
+
+  
