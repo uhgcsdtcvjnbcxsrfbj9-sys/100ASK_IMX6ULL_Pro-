@@ -1,0 +1,110 @@
+那么该如何编写驱动程序？
+确定主设备号，也可以让内核分配；
+定义自己的 file_operations 结构体， 这是核心； ；
+实现对应的 drv_open/drv_read/drv_write 等函数，填入 file_operations 结构
+体；
+把 file_operations 结构体告诉内核：通过 register_chrdev 函数；
+谁来注册驱动程序？需要一个入口函数：安装驱动程序时，就会去调用这个
+入口函数；
+有入口函数就应该有出口函数：卸载驱动程序是，出口函数调用
+unregister_chrdev;
+其它完善：提供设备信息，自动创建设备节点：
+class_create,device_create;
+
+
+
+
+从 “设计思路” 到 “分层架构
+这张图回答的是：APP 想怎么用 LED 驱动？驱动要怎么设计接口？
+1. 从上到下 4 层拆解
+① 用户层：怎么用？
+用户直接跑 ledtest 这个测试程序，只需要做两件事：
+打开设备：open("/dev/led0", ...)
+控制亮灭：write(fd, val, 1) （val 是 0/1 表示开 / 关）
+完全不用关心底层是哪个引脚、哪个寄存器。
+② APP 层：标准文件接口
+APP 只认识 Linux 标准文件函数：open / write
+open 用来 “准备好 LED”
+write 用来 “发指令控制 LED”
+③ 驱动层：我们要实现的核心逻辑
+驱动要实现两个关键函数，和 APP 一一对应：
+led_open：APP 调用 open 时触发
+根据主设备号确定是哪个 LED（比如 led0 对应第一个 LED）
+使能对应 GPIO 模块时钟
+配置引脚为输出模式
+led_write：APP 调用 write 时触发
+根据主设备号确定控制哪个 LED
+根据 APP 传来的 val 设置引脚电平（0 亮 /1 灭，或反过来）
+④ 硬件层：GPIO 引脚
+驱动最终通过读写寄存器，直接控制 LED 对应的 GPIO 引脚电平，实现亮灭。
+2. 这张图的核心思想
+把复杂的硬件操作，封装成简单的文件接口
+APP 只需要像操作普通文件一样，就能控制 LED，和硬件细节完全解耦。
+
+
+分层思想（支持多个板子）
+这张图解决的是：怎么让同一个驱动，能跑在不同开发板上？
+比如你的 IMX6ULL、别人的 STM32、别的芯片，LED 引脚不一样，总不能每个板子写一套驱动吧？所以要分层！
+1. 第一步：拆成两层（通用框架 + 硬件操作）
+把驱动分成两部分：
+通用框架	leddrv.c	实现字符设备驱动的通用逻辑（open/write），和硬件无关
+硬件操作	board_X.c	实现不同板子的硬件细节（GPIO 初始化、电平控制）
+工作流程：
+APP 调用 open → leddrv.c 的 led_open → 调用 board_led_init
+APP 调用 write → leddrv.c 的 led_write → 调用 board_led_ctl
+这样一来，换板子只需要换 board_X.c，不用改 leddrv.c，实现 “一份框架，多份适配”。
+
+
+2. 第二步：用面向对象思想，抽象出 led_operations 结构体
+为了让框架和硬件彻底解耦，定义一个操作结构体，把硬件操作 “打包” 起来：
+struct led_operations {
+    int (*init)(int which);    // 初始化 LED，which 表示第几个LED
+    int (*ctl)(int which, int status); // 控制LED，status:1亮，0灭
+};
+这个结构体就像一个 “接口协议”：
+上层 leddrv.c 只需要调用 led_operations.init() 和 led_operations.ctl()，完全不管底层怎么实现
+每个板子的 board_X.c 只要实现这个结构体里的函数，就能被框架调用
+工作流程：
+board_A.c 实现 board_led_init 和 board_led_ctl，然后定义：
+struct led_operations led_opr = {
+    .init = board_led_init,
+    .ctl = board_led_ctl,
+};
+board_B.c 也实现一套自己的 board_led_init 和 board_led_ctl，同样定义 led_opr
+上层 leddrv.c 只需要拿到 led_opr，调用里面的 init 和 ctl 函数，就能控制不同板子的 LED，不用改任何代码
+
+3. 分层架构的好处
+可复用：通用框架 leddrv.c 写一次，所有板子都能用
+易维护：改硬件只需要改 board_X.c，不影响上层逻辑
+可扩展：加新板子只需要新增一个 board_new.c，不用动原有代码
+三、两张图连起来看：完整的 LED 驱动设计
+先定接口：APP 用 open/write 控制 LED，驱动实现 led_open/led_write 对应
+再做分层：把驱动拆成通用框架 + 硬件操作，用 led_operations 结构体做接口
+上层 leddrv.c 负责和 APP 交互，下层 board_X.c 负责具体硬件操作
+
+
+三、两张图连起来看：完整的 LED 驱动设计
+先定接口：APP 用 open/write 控制 LED，驱动实现 led_open/led_write 对应
+再做分层：把驱动拆成通用框架 + 硬件操作，用 led_operations 结构体做接口
+上层 leddrv.c 负责和 APP 交互，下层 board_X.c 负责具体硬件操作
+
+
+
+先回答你最疑惑的点：
+让 LED 亮灭 = 确实是修改芯片内部的寄存器！
+寄存器 = 就是硬件！硬件 = 就是芯片里的电路 + 寄存器！
+你现在的误解只有一句话：
+你以为 “硬件” 是开发板上的 LED 灯。
+不对！
+芯片内部的寄存器、GPIO 电路，也叫硬件！
+我给你彻底拆清楚：
+1. 什么叫 “和硬件相关”？
+只要代码里出现：
+寄存器地址 0x020C4068
+操作 CCM
+操作 IOMUXC
+操作 GPIO1_DR
+操作 GDIR
+这些 全部属于硬件相关代码！
+. 那 通用层（leddrv.c） 是什么？
+通用层 绝对不出现任何寄存器！
