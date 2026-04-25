@@ -1,0 +1,165 @@
+module_init(hello_init)
+作用：告诉内核，驱动的入口函数是 hello_init
+module_exit(hello_exit)
+作用：告诉内核，驱动的出口函数是 hello_exit
+
+二、关键知识点：驱动有 两种编译方式
+这是理解 module_init/module_exit 的关键！
+1. 编译成 .ko 模块（你现在用的）
+用 insmod 加载
+用 rmmod 卸载
+编译时 会定义 MODULE 宏
+2. 直接 编译进内核（zImage）
+开机自动运行
+不能卸载
+编译时 不定义 MODULE 宏
+
+*module_init/module_exit 就是给驱动函数
+起一个内核能识别的名字，
+让内核能找到并执行驱动的入口 / 出口。**
+
+
+register_chrdev 就干 3 件事：
+申请一块设备号（主设备号 + 一批次设备号）
+创建一个字符设备 cdev
+把设备号 + fops 绑定，登记到内核
+这样内核以后就能通过主设备号找到你的驱动。fops = file_operations 的缩写
+
+第 1 步：申请设备号区域
+告诉内核：
+我要用 主设备号 = major
+我要用 次设备号 0 ~ 255
+看看有没有人占用？没人占我就用了！
+这一步只管设备号，不管驱动！
+第 2 步：创建字符设备 cdev
+作用：
+创建一个内核标准字符设备结构体，
+把你的 file_operations（open/read/write） 绑进去。
+cdev = 字符设备本体
+里面装着驱动的操作函数
+
+把 cdev 加入内核
+作用：
+告诉内核：
+这个设备号 对应这个 cdev
+以后有人 open /dev/xxx，就找它！
+
+APP open /dev/xxx
+取出主设备号（例如 256）
+256 % 255 = 1
+去 chrdevs [1] 链表里逐个对比 major
+找到 ==256 的那个
+找到对应的 cdev
+调用 open/read/write
+
+insmod 到底是什么？干什么用的？
+一、终极一句话答案
+**insmod 是一个 Linux 命令！
+作用：把 .ko 驱动文件 ** 加载到内核里 ，让驱动开始工作！
+只有在执行 insmod 加载驱动的时候，才会注册！
+加载驱动
+↓
+内核调用 入口函数 hello_init
+↓
+hello_init 内部执行 register_chrdev
+↓
+驱动才真正注册到内核！
+驱动不是已经编译成 .ko 文件了吗？
+为什么还要 “加载”？
+加载到底在干嘛？
+我一句话先给你捅破：
+🎯 一句话终极答案
+** 把 .ko 文件 读到内存里
+让内核能够找到它、执行它、使用它
+这就叫：加载驱动到内核 
+
+
+先给你 终极总流程（必须背）
+1. 开发板上电 → 内核启动
+2. 你输入：insmod hello_drv.ko
+3. 内核执行 → hello_init（入口函数）
+   ① 注册驱动 register_chrdev
+   ② 创建 class
+   ③ 生成 /dev/hello
+4. 驱动等待被 APP 使用
+5. 你运行测试程序：./hello_drv_test -w abc
+6. APP open → 内核 → 驱动 hello_drv_open
+7. APP write → 内核 → 驱动 hello_drv_write
+8. APP close → 内核 → 驱动 hello_drv_close
+9. 你可以再次运行读测试：./hello_drv_test -r
+10. 你输入：rmmod hello_drv
+11. 内核执行 → hello_exit（出口函数）
+    ① 销毁 /dev/hello
+    ② 注销驱动
+
+    * 创建 class 是什么？
+    我驱动都注册完了，为什么还要创建设备类、设备节点？
+    驱动注册（register_chrdev） ≠ 能被 APP 访问！
+register_chrdev 只是让内核认识驱动
+但应用程序根本找不到它
+APP 只能访问 /dev/xxx 这种设备文件
+所以必须：
+创建 class → 生成 /dev/hello
+class = 设备的分类、户口本
+内核需要把设备分类
+比如：输入设备、LED 设备、串口设备
+你的驱动也需要一个分类
+这个类会出现在 /sys/class/hello_class
+
+
+为后面自动生成 /dev/hello 做准备！
+没有 class，就不能自动生成设备节点。
+
+app如何访问驱动
+APP  open("/dev/hello")
+          ↓
+内核 取出主设备号（244）
+          ↓
+内核 查驱动表 → 找到你的驱动
+          ↓
+内核 调用驱动的 open/read/write
+          ↓
+驱动 执行操作
+          ↓
+结果 返回给 APP
+*insmod 做的 3 件事 = 创造 APP 访问驱动的所有条件！
+没有 insmod，APP 永远无法访问驱动！**
+
+
+真实产品里，驱动是怎么运行的？
+我给你看真正开机流程：
+1. 开发板 / 手机开机
+2. 内核启动
+3. 系统自动执行：insmod 按键驱动.ko
+4. 系统自动执行：insmod LED 灯驱动.ko
+5. 驱动全部加载完成 → 生成设备节点
+6. 然后才进入桌面 / 界面
+7. 你按键 → 灯亮（这时候驱动早就运行了）
+
+
+
+真实产品中，驱动有 2 种加载方式
+方式 1：直接编译进内核（最常见）
+驱动和内核绑在一起
+开机自动运行
+不需要 insmod
+不需要 .ko 文件
+手机、平板、电视 99% 都这么干
+方式 2：开机自动加载 ko 文件
+驱动是 .ko
+系统开机时自动执行 insmod
+你看不见，但系统在后台执行
+路由器、摄像头、工业设备常用
+
+三、驱动编译进内核后，会发生什么？（真实流程）
+1. 开发板开机
+2. 内核启动
+3. 内核自动执行你的驱动入口函数（hello_init）
+4. 驱动注册、生成 /dev/hello
+5. 驱动全程在后台运行
+6. APP 随时可以控制 LED、按键、屏幕
+** 全程不需要你做任何事！
+没有 insmod！
+没有命令行！
+用户完全无感！**
+
