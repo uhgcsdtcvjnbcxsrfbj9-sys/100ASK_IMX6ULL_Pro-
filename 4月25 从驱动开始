@@ -1,0 +1,402 @@
+怎么编写驱动程序
+1. 确定主设备号
+是什么：主设备号（major number）是内核给你驱动分配的唯一 “身份证号”，范围是 0~255。
+为什么要这么做：
+应用程序通过 /dev/xxx 设备文件和内核通信，内核就是靠 主设备号 找到对应的驱动。
+不同的主设备号代表不同类型的驱动（比如串口、LED、键盘）。
+不能和系统里其他驱动冲突，否则内核会不知道该把请求发给谁。
+两种获取方式：
+静态指定：#define MY_MAJOR 230（简单，但容易冲突）
+动态分配：内核自动分配一个未使用的号（更推荐，安全）
+
+
+定义自己的 file_operations 结构体
+是什么：struct file_operations 是一个函数指针表，你要在这里面填好你驱动实现的操作函数（open、read、write、ioctl 等）。
+为什么要这么做：
+Linux 内核的设计思想是 “一切皆文件”。
+应用程序调用 open() / read() / write() 时，内核会通过这个结构体，调用你写的对应函数。
+这是内核和驱动之间约定好的 “接口规范”，你必须按这个格式来，内核才认识你。
+
+
+
+3. 实现对应的 open/read/write 等函数，填入 file_operations
+是什么：这些函数就是你驱动的 “干活儿的地方”。
+open：应用打开设备时调用，比如初始化硬件、准备资源。
+read：应用读设备时调用，比如读取传感器数据。
+write：应用写设备时调用，比如控制 LED 亮灭。
+release：应用关闭设备时调用，比如释放资源。
+为什么要这么做：
+你定义了 file_operations 结构体，只是告诉内核 “我支持这些操作”，但内核不知道具体怎么做。
+你必须自己实现这些函数，才能真正控制硬件。
+比如 my_write 里，你可以直接操作寄存器，让 LED 亮灭。
+
+
+
+
+4. 把 file_operations 结构体告诉内核：注册驱动程序
+是什么：用 register_chrdev() 函数，把你的主设备号、设备名、file_operations 结构体一起告诉内核。
+为什么要这么做：
+只有注册了，内核才知道：
+这个主设备号对应哪个驱动
+应用程序的操作应该交给哪个 file_operations 处理
+不注册的话，你的驱动只是一堆躺在内存里的代码，内核根本不认识它。
+
+
+
+ 谁来注册驱动程序？得有一个入口函数
+是什么：驱动的入口函数，用 module_init() 宏标记，驱动加载时内核会自动调用它。
+为什么要这么做：
+驱动不是普通程序，它是内核模块，不能自己运行 main()。
+内核加载模块时，需要一个入口点，这个函数就是模块的 “main 函数”。
+你要在入口函数里调用 register_chrdev() 完成注册。
+
+
+
+. 有入口函数就应该有出口函数
+是什么：驱动的出口函数，用 module_exit() 宏标记，驱动卸载时内核会自动调用它。
+为什么要这么做：
+驱动模块可以动态加载和卸载（insmod/rmmod）。
+卸载时必须清理资源：
+注销驱动（unregister_chrdev()）
+释放硬件资源、内存
+不清理会导致内核资源泄漏，甚至崩溃。
+
+
+
+你写了一个驱动模块 .ko 文件
+用 insmod my_drv.ko 加载模块
+内核调用 module_init 标记的入口函数
+入口函数里调用 register_chrdev() 注册驱动
+同时调用 class_create / device_create 自动创建 /dev/myled
+应用程序 open("/dev/myled") → 内核通过主设备号找到驱动，调用 my_open
+应用程序 write(fd, "1", 1) → 内核调用 my_write，你在里面控制硬件
+应用 close(fd) → 内核调用 my_release
+用 rmmod my_drv 卸载模块 → 内核调用出口函数，清理资源
+
+
+
+
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/errno.h>
+#include <linux/miscdevice.h>
+#include <linux/kernel.h>
+#include <linux/major.h>
+#include <linux/mutex.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/stat.h>
+#include <linux/init.h>
+#include <linux/device.h>
+#include <linux/tty.h>
+#include <linux/kmod.h>
+#include <linux/gfp.h>
+linux/module.h：模块必须用（加载 / 卸载驱动）
+linux/fs.h：文件操作 file_operations 必须用
+linux/device.h：自动创建 /dev/hello 必须用
+其他都是辅助功能，不用深究
+
+
+/* 1. 确定主设备号 */
+/* 1. 确定主设备号 */
+static int major = 0;         // 主设备号，0=让内核自动分配
+static char kernel_buf[1024]; // 内核空间缓冲区，存数据
+static struct class *hello_class; // 设备类，用于自动创建设备节点
+
+#define MIN(a, b) (a < b ? a : b)作用：取两个数里较小的那个，防止读写越界。
+/* 3. 实现对应的 open/read/write 等函数，填入 file_operations 结构体 */
+static ssize_t hello_drv_read (struct file *file, char __user *buf, size_t size, loff_t *offset)
+{
+	int err;
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	err = copy_to_user(buf, kernel_buf, MIN(1024, size));
+	return MIN(1024, size);
+}
+static ssize_t hello_drv_read(...)
+原理：read 系统调用的驱动实现函数
+作用：APP 调用 read () → 内核调用这个函数
+参数格式是固定的！不能改！
+返回值 ssize_t：返回读取的字节数
+int err;
+原理：接收函数返回错误码
+作用：保存 copy_to_user 的返回值
+printk(...);
+原理：内核版 printf
+作用：打印调试信息，dmesg 可查看
+固定用法
+err = copy_to_user(buf, kernel_buf, MIN(1024, size));
+原理：内核空间 → 用户空间 数据拷贝
+为什么必须用它？
+用户指针 buf 不能直接在内核访问
+直接访问会内核崩溃
+固定用法！必须用 copy_to_user！
+return MIN(1024, size);
+原理：返回成功读取的字节数
+作用：告诉应用读了多少数据
+固定写法
+
+
+
+
+static ssize_t hello_drv_write (struct file *file, const char __user *buf, size_t size, loff_t *offset)
+{
+	int err;
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	err = copy_from_user(kernel_buf, buf, MIN(1024, size));
+	return MIN(1024, size);
+}
+逐行解释
+hello_drv_write
+原理：APP write () → 驱动执行这里
+参数格式固定！
+copy_from_user(kernel_buf, buf, ...)
+原理：用户空间 → 内核空间
+为什么必须用？用户指针不可直接在内核读写
+固定用法！必须用！
+
+
+static int hello_drv_open (struct inode *node, struct file *file)
+{
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	return 0;
+}
+原理：APP open () → 驱动执行 open
+作用：初始化硬件、初始化变量
+返回 0 表示成功，负数表示失败
+格式固定！
+
+
+static int hello_drv_close (struct inode *node, struct file *file)
+{
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	return 0;
+}
+原理：APP close () → 驱动执行 close
+作用：释放资源
+格式固定！
+
+/* 2. 定义自己的 file_operations 结构体 */
+static struct file_operations hello_drv = {
+	.owner = THIS_MODULE,
+	.open = hello_drv_open,
+	.read = hello_drv_read,
+	.write = hello_drv_write,
+	.release = hello_drv_close,
+};
+这是整个驱动的灵魂！！！
+struct file_operations
+原理：驱动与内核的接口标准
+作用：告诉内核应用调用系统调用时，执行哪个函数
+Linux 一切皆文件的核心！
+.owner = THIS_MODULE
+原理：防止驱动正在使用时被 rmmod 卸载
+固定写法！必须写！
+.open = hello_drv_open
+原理：绑定函数
+open → 对应应用 open ()
+read → 对应应用 read ()
+write → 对应应用 write ()
+release → 对应应用 close ()
+名字固定！左边不能改！右边是你自己的函数名！
+/* 4. 把 file_operations 结构体告诉内核：注册驱动程序 */
+/* 5. 入口函数：安装驱动程序时调用 */
+static int __init hello_init(void)
+{
+	int err;
+
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	major = register_chrdev(0, "hello", &hello_drv);
+
+	hello_class = class_create(THIS_MODULE, "hello_class");
+	err = PTR_ERR(hello_class);
+	if (IS_ERR(hello_class)) {
+		printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+		unregister_chrdev(major, "hello");
+		return -1;
+	}
+
+	device_create(hello_class, NULL, MKDEV(major, 0), NULL, "hello");
+
+	return 0;
+}
+static作用：作用域仅限本文件内核驱动里绝大多数函数都用 static
+固定写法
+2. int返回值返回 0 = 成功返回 负数 = 失败固定写法
+3. __init是内核宏作用：告诉内核这是初始化代码，执行完就释放内存，节省空间只有入口函数才能加固定写法，必须加！
+4. hello_init(void)函数名：随便起，比如 led_init、uart_init 都行void：表示入口函数没有参数
+major = register_chrdev(0, "hello", &hello_drv);
+第 1 个参数：0
+register_chrdev( 0 , ... )
+0 = 让内核自动分配主设备号
+如果你填 200，就是手动指定主设备号 200
+填 0 最安全，不会冲突
+内核会返回一个可用的主设备号，存到 major 变量里
+第 2 个参数："hello"
+驱动名字
+加载后可以在 /proc/devices 看到
+随便起，比如 "myled", "test" 都行
+第 3 个参数：&hello_drv
+hello_drv 是你前面定义的：
+static struct file_operations hello_drv = { ... };
+作用：把你的 open/read/write 函数集合告诉内核
+必须传地址 &hello_drv
+返回值：
+成功：返回主设备号
+失败：返回负数
+/* 6. 出口函数：卸载驱动程序时调用 */
+static void __exit hello_exit(void)
+{
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	device_destroy(hello_class, MKDEV(major, 0));
+	class_destroy(hello_class);
+	unregister_chrdev(major, "hello");
+}
+原理：驱动卸载函数
+作用：释放资源，顺序必须相反
+销毁设备 → 销毁类 → 注销驱动
+固定写法！顺序不能乱！
+/* 7. 其他完善：提供设备信息，自动创建设备节点 */
+module_init(hello_init);
+module_exit(hello_exit);
+
+MODULE_LICENSE("GPL");
+module_init(hello_init);
+原理：告诉内核入口函数
+固定写法！
+module_exit(hello_exit);
+原理：告诉内核出口函数
+固定写法！
+MODULE_LICENSE("GPL");
+原理：内核规定，不写无法加载
+必须写！固定写法
+
+应用程序想要去访问驱动程序，需要什么
+
+
+🎯 ** 应用程序根本不直接碰驱动！
+它只访问「设备文件」，比如 /dev/hello
+内核自动帮应用程序要访问驱动，只需要 4 样东西
+我给你列得清清楚楚：
+1. 要有一个设备文件（/dev/xxx）
+例如你的驱动生成的：你找到对应的驱动！**
+/dev/hello
+✅ 这是 APP 唯一能看到的东西
+✅ APP 根本不知道驱动在哪，只知道打开这个文件
+2. 应用程序调用open("/dev/hello", O_RDWR);
+read(fd, buf, size);
+write(fd, buf, size);
+close(fd);标准 Linux 接口（系统调用）
+✅ 这些是标准 Linux 接口，不是你写的
+✅ 内核会接管，自动找到驱动
+3. 内核通过主设备号找到驱动
+你驱动注册时：
+major = register_chrdev(0, "hello", &hello_drv);
+内核记住了：
+主设备号 → 你的驱动
+ APP 打开 /dev/hello
+内核取出设备号 → 找到驱动 → 调用 hello_drv_open
+/dev/xxx 只是一个 “文件壳”，它里面藏了：主设备号 + 次设备号
+内核就是靠这个【主设备号】找到驱动的！
+内核启动时，会维护一张表：
+主设备号 → 对应的驱动（file_operations）
+
+
+
+
+
+
+
+
+测试程序
+一句话终极答案：
+** 测试程序 = 应用程序（APP）
+它的唯一作用：
+去调用 /dev/hello 设备文件，验证你的驱动能不能正常工作！
+你现在有 两个东西：
+驱动程序（hello_drv.c）
+运行在内核里
+负责和硬件打交道
+提供 open/read/write 功能
+不能直接运行、不能直接测试
+测试程序（hello_test.c）
+运行在应用层
+就是一个普通 C 程序
+它做的事：
+open 打开驱动
+write 写数据
+read 读数据
+close 关闭驱动
+
+
+掌握知识
+、编译驱动为什么必须用内核源码？
+驱动是内核模块，依赖内核的头文件、结构体、函数。
+每个 ARM 板子的内核配置、芯片型号不同 → 头文件不同。
+所以编译驱动时 必须指定该板子对应的内核源码路径。
+
+
+Makefile 核心知识点（必须懂）
+1. KERN_DIR
+作用：指定你开发板所用的内核源码路径
+必须正确，否则编译失败
+不同开发板 → 路径不同
+2. obj-m += hello_drv.o
+告诉内核：把 hello_drv.c 编译成模块（.ko）
+固定写法
+3. make -C $(KERN_DIR) M=pwd modules
+最核心的编译命令
+-C $(KERN_DIR)：进入内核目录
+M=pwd：回到当前目录编译驱动
+modules：编译模块
+4. 整个 Makefile 做了 2 件事
+编译驱动：hello_drv.c → hello_drv.ko
+编译测试 APP：hello_drv_test.c → hello_drv_test
+
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+export PATH=$PATH:/路径/到/交叉编译器/bin
+ARCH=arm
+告诉内核编译 ARM 架构
+CROSS_COMPILE=xxx-
+指定交叉编译器前缀
+PATH
+让系统能找到交叉编译器
+、驱动文件类型
+.c 源文件
+编译后 → .ko（内核模块文件）
+只有 .ko 才能放到开发板运行
+
+Makefile 到底是干什么的？
+一句话终极答案
+**Makefile = 一个 “自动编译脚本”
+作用：让你不用每次敲一大串编译命令，
+只需要输入一个 make 命令，
+它就自动帮你把 .c 文件编译成可执行程序或驱动。**
+
+
+把c文件编译成arm可执行文件都需要哪些步骤
+步骤 1：安装 ARM 交叉编译器
+你在 Ubuntu（x86 电脑）上写代码
+要在 ARM 板（如 IMX6ULL）上运行
+必须用 专门给 ARM 编译的编译器
+步骤 2：配置 3 个环境变量（必须！）
+编译 ARM 程序前，一定要执行这 3 条命令：
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+export PATH=$PATH:/你的编译器路径/bin
+步骤 3：执行编译命令
+✔ 如果你编译 应用程序（APP）
+arm-linux-gnueabihf-gcc -o test test.c
+生成：test（ARM 可执行文件）
+✔ 如果你编译 驱动程序（.ko）
+必须用内核的 Makefile 编译：
+make -C 内核源码路径 M=当前目录 modules
+生成：xxx.ko（ARM 驱动模块）
+步骤 4：把程序传到 ARM 开发板运行
+adb push test /root
+adb push xxx.ko /root
+
+
+
+
+
