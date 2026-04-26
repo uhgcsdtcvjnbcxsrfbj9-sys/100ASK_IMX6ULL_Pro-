@@ -1,0 +1,491 @@
+1）insmod leddrv.ko
+注册字符设备
+导出 register_led_operations
+2）insmod board_A.ko
+注册 platform 设备
+告诉内核引脚资源
+3）insmod chip_demo_gpio.ko
+注册 platform 驱动
+内核总线发现 名字一样
+自动调用 probe
+4）probe 里做什么
+读取设备的引脚
+创建设备节点 /dev/led0 /dev/led1
+把 init/ctl 函数注册给上层
+5）应用层 open /dev/led0
+调用 led_drv_open
+调用 p_led_opr->init
+初始化 GPIO
+6）应用层 write 1
+调用 led_drv_write
+调用 p_led_opr->ctl
+点灯成功
+
+主设备号 major
+用来找「哪一个驱动」
+比如：LED 驱动、串口驱动、键盘驱动、硬盘驱动，靠主设备号区分
+次设备号 minor
+用来找「当前驱动下的第几个设备」
+比如：
+LED 驱动里：led0、led1
+串口驱动里：ttyS0、ttyS1
+
+
+一、先搞懂改造后的整体架构
+改造后的 LED 驱动被拆成了 3 个独立模块，各司其职：
+模块	文件	作用
+通用层	leddrv.c	实现字符设备接口、创建设备节点，完全硬件无关
+设备端	board_A.c	定义platform_device，只写 LED 引脚 / 资源信息
+驱动端	chip_demo_gpio.c	实现platform_driver，在probe中获取资源、实现 LED 操作
+
+
+
+二、10.3.1 两个关键注意事项（必看，否则编译报错）
+ platform_device 必须提供 .release 函数
+问题：如果不写，卸载模块时内核会警告：Device 'xxx' does not have a release() function
+原因：内核在释放设备时，会调用这个函数清理资源，哪怕你什么都不做，也要给一个空函数
+
+模块间函数调用，必须用 EXPORT_SYMBOL 导出
+场景：chip_demo_gpio.c 要调用 leddrv.c 里的 register_led_operations 函数
+规则：
+被调用的函数，必须用 EXPORT_SYMBOL(函数名) 导出
+加载顺序：先加载被调用的模块（leddrv.ko），再加载调用模块（chip_demo_gpio.ko）
+否则报错：Unknown symbol 符号未定义
+
+
+
+一、先记住：整个驱动分 3 个文件，各司其职
+leddrv.c —— 通用上层（提供 open/write 接口，硬件无关）
+board_A.c —— 设备端（只写硬件资源：哪个引脚）
+chip_demo_gpio.c —— 驱动端（操作 GPIO，实现点灯逻辑）
+
+
+二、总流程（最核心，背下来）
+加载 leddrv.ko → 注册字符设备，导出接口给别人调用
+加载 board_A.ko → 向内核注册 platform 设备（带引脚资源）
+加载 chip_demo_gpio.ko → 注册 platform 驱动
+内核总线自动匹配（名字一样就匹配）
+匹配成功 → 自动调用 probe 函数
+probe 里：
+读取设备的引脚资源
+把操作函数注册给上层 leddrv.c
+应用层 open → 调用 init
+应用层 write → 调用 ctl 点灯
+
+
+第一个文件：board_A.c（设备端，只写资源）
+作用
+只告诉内核：LED 用的是哪个引脚，不写任何操作代码。
+1. 定义资源
+#define GROUP_PIN(g,p) ((g<<16) | (p))
+作用：把 组号 + 引脚号 合成一个数字
+g<<16：组号放在高 16 位
+p：引脚号放在低 16 位
+为什么？ 方便把两个信息塞进一个资源里
+static struct resource resources[] = {
+    {
+        .start = GROUP_PIN(3,1),
+        .flags = IORESOURCE_IRQ,
+        .name = "100ask_led_pin",
+    },
+    {
+        .start = GROUP_PIN(5,8),
+        .flags = IORESOURCE_IRQ,
+        .name = "100ask_led_pin",
+    },
+};
+struct resource：内核标准结构体，用来描述硬件资源
+.start：存放我们的引脚（组 3 引脚 1、组 5 引脚 8）
+.flags = IORESOURCE_IRQ：
+→ 不是真中断！只是借用这个类型来传递自定义数据
+→ 内核不会把它当中断
+.name：随便起，方便看代码
+2，定义 platform_device
+static struct platform_device board_A_led_dev = {
+    .name = "100ask_led",
+    .num_resources = ARRAY_SIZE(resources),
+    .resource = resources,
+    .dev = {
+        .release = led_dev_release,
+    },
+};
+.name = "100ask_led"
+→ 最重要！ 驱动必须和它名字一样才能匹配
+.num_resources：资源个数（2 个 LED）
+.resource：指向上面的资源数组
+.dev.release
+→ 必须写！ 内核要求每个 device 必须有一个 release 函数
+→ 不写会报错：device ‘xxx’ does not have a release()
+static void led_dev_release(struct device *dev)
+{
+}
+空函数，什么都不用干，只是满足内核要求。
+
+static int __init led_dev_init(void)//__init：标记这是初始化函数，内核加载完会把它扔掉，节省内存
+{
+    return platform_device_register(&board_A_led_dev);
+}
+platform_device_register
+→ 把设备注册进内核，挂到 platform 总线
+static void __exit led_dev_exit(void)
+{
+    platform_device_unregister(&board_A_led_dev);
+}
+
+
+第二个文件：chip_demo_gpio.c（驱动端）
+作用
+操作 GPIO，实现点灯，匹配设备后自动运行 probe
+
+
+1. 保存引脚
+static int g_ledpins[100];
+static int g_ledcnt = 0;
+probe 拿到引脚后存在这里，供 init/ctl 使用
+
+
+2. probe 函数（最最核心！）
+static int chip_demo_gpio_probe(struct platform_device *pdev)
+{
+    struct resource *res;
+    int i = 0;
+
+    while (1) {
+        res = platform_get_resource(pdev, IORESOURCE_IRQ, i++);
+        if (!res)
+            break;
+
+        g_ledpins[g_ledcnt] = res->start;
+        led_class_create_device(g_ledcnt);
+        g_ledcnt++;
+    }
+
+    register_led_operations(&board_demo_led_opr);
+    return 0;
+}
+struct platform_device *pdev
+→ 最重要的参数！
+→ 这就是匹配成功的那个设备
+→ 也就是你 board_A.c 里写的 board_A_led_dev
+→ 它里面带着所有硬件引脚资源
+
+struct resource：内核用来表示硬件资源的结构体
+（引脚、地址、中断都用它表示）
+res：用来接收从设备里拿出来的资源
+
+int i = 0;
+i：用来遍历多个资源
+第 0 个资源 → LED0
+里面每一个参数解释：
+pdev
+→ 设备（来自 board_A.c）
+→ 里面带着引脚资源
+IORESOURCE_IRQ
+→ 资源类型
+→ 注意：这里不是真的中断！只是借用这个类型传引脚
+→ 你在 board_A.c 里定义资源时写的就是这个类型
+i++
+→ 第几个资源
+→ 第一次 i=0 → 拿第 0 个 LED 引脚
+→ 第二次 i=1 → 拿第 1 个 LED 引脚
+→ 直到拿完为止
+返回值 res
+→ 拿到的资源（包含引脚信息）
+→ 没拿到就返回 NULL
+if (!res)
+    break;
+如果 res == NULL
+→ 表示资源取完了
+所以退出循环
+g_ledpins[g_ledcnt] = res->start;
+解释
+g_ledpins[ ]：全局数组，保存所有 LED 的引脚
+g_ledcnt：当前第几个 LED
+res->start：
+→ 资源里保存的真实引脚数据
+→ 就是你在 board_A.c 里写的
+GROUP_PIN(3,1)、GROUP_PIN(5,8)
+一句话：把引脚存起来，后面 init/ctl 要用。
+led_class_create_device(g_ledcnt);
+作用
+在 /dev 目录下创建设备节点：/dev/led0、/dev/led1...
+参数 g_ledcnt 是第几个 LED
+创建设备节点后，应用程序才能 open
+g_ledcnt++;
+LED 数量 + 1
+为下一个 LED 做准备
+register_led_operations(&board_demo_led_opr);
+作用
+把 LED 的操作函数（init、ctl）注册给上层 leddrv.c
+这样：
+应用 open → 调用我们的 init
+应用 write → 调用我们的 ctl
+
+
+3. LED 操作函数
+static int board_demo_led_init(int which)
+{
+    unsigned int group = GROUP(g_ledpins[which]);
+    unsigned int pin = PIN(g_ledpins[which]);
+
+    // 配置 GPIO 为输出
+    ...根据组和引脚操作寄存器...
+}
+which：第几个 LED
+GROUP(g_ledpins[which])：从保存的数值里解出组号
+PIN(...)：解出引脚
+static int board_demo_led_ctl(int which, char status)
+{
+    // 根据 status 置 1/清 0 点灯
+}
+这两个函数，就是 真正操作硬件、点灯、初始化 GPIO 的函数
+board_demo_led_init：初始化 LED 引脚（设为输出）
+board_demo_led_ctl：控制 LED 亮 / 灭
+应用程序 open → 调用 init
+应用程序 write → 调用 ctl
+
+先讲两个最重要的宏（你必须懂）
+在你的代码里一定有这两个宏：
+#define GROUP(x)  ((x >> 16) & 0xFFFF)  // 取出高16位：组号
+#define PIN(x)    (x & 0xFFFF)         // 取出低16位：引脚号
+它们的作用：
+把之前存的 GROUP_PIN(3,1) 这种数据，拆分成组号和引脚号。
+
+
+4. 封装操作结构体
+static struct led_operations board_demo_led_opr = {
+    .init = board_demo_led_init,
+    .ctl = board_demo_led_ctl,
+};
+给上层调用的统一接口，面向对象思想。
+
+5. 定义 platform_driver
+static struct platform_driver chip_demo_gpio_driver = {
+    .probe = chip_demo_gpio_probe,
+    .remove = chip_demo_gpio_remove,
+    .driver = {
+        .name = "100ask_led",
+    },
+};
+.name = "100ask_led"
+→ 必须和设备名字一样！ 才能匹配
+.probe：匹配成功自动调用
+.remove：驱动卸载时调用
+struct platform_driver
+这是 Linux 内核定义的标准结构体
+表示：一个平台总线驱动
+2. .probe = chip_demo_gpio_probe
+作用：
+设备和驱动匹配成功后，内核自动调用这个函数！
+什么时候会被调用？
+你加载了设备（board_A.ko）
+你加载了驱动（chip_demo_gpio.ko）
+两者名字一样
+内核自动调用 probe
+probe 里做什么？
+从设备里拿引脚
+保存硬件信息
+注册操作函数
+创建设备节点
+总结：
+.probe = 驱动的入口函数
+3. .remove = chip_demo_gpio_remove
+作用：
+驱动卸载 / 设备移除时，内核自动调用这个函数！
+什么时候调用？
+rmmod chip_demo_gpio.ko
+或者 rmmod board_A.ko
+只要设备或驱动任何一方卸载，内核就会调用 remove。
+remove 里做什么？
+释放设备节点
+释放内存
+关闭硬件
+取消注册
+总结：
+.remove = 驱动的出口、清理函数
+最重要的来了 ↓↓↓
+4. .driver = { ... }
+这是驱动的基础信息，里面最重要的就是 name
+.driver = {
+    .name = "100ask_led",
+},
+4.1 .name = "100ask_led"
+这是驱动的名字，用来匹配设备！
+你设备端 board_A.c 里写的是：
+static struct platform_device board_A_led_dev = {
+    .name = "100ask_led",   // ← 必须一样！
+};
+规则：
+驱动名字 == 设备名字 → 匹配成功！
+
+
+
+
+第三个文件：leddrv.c（通用上层）
+作用
+实现 open/read/write，给应用层调用，完全不碰硬件
+1. 提供接口让驱动注册函数
+static struct led_operations *p_led_opr;
+struct led_operations
+这是一个结构体，里面包含 2 个函数指针：
+struct led_operations {
+    int (*init)(int which);      // 初始化LED
+    int (*ctl)(int which, char status); // 控制亮灭
+};
+*p_led_opr
+一个函数指针结构体，用来保存下层传上来的操作函数
+一句话：
+这是一个 “钩子”，等着下层把操作函数挂上来。
+int register_led_operations(struct led_operations *opr)
+{
+    p_led_opr = opr;
+}
+register_led_operations
+函数名：注册 LED 操作函数
+struct led_operations *opr
+参数：指针！
+指向下层驱动提供的操作函数结构体
+这个参数是什么？
+就是 chip_demo_gpio.c 里的这个东西：
+static struct led_operations board_demo_led_opr = {
+    .init = board_demo_led_init,
+    .ctl  = board_demo_led_ctl,
+};
+所以：
+opr = &board_demo_led_opr
+p_led_opr = opr;
+意思：
+把下层传过来的操作函数，保存到上层的全局指针里。
+从此以后：
+p_led_opr->init → 调用下层的初始化
+p_led_opr->ctl → 调用下层的点灯''
+
+
+EXPORT_SYMBOL(register_led_operations);
+EXPORT_SYMBOL：
+→ 把函数导出，让别的模块（chip_demo_gpio）可以调用
+为什么？ 让驱动层把操作函数传进来
+给下层驱动（chip_demo_gpio.c）提供一个函数，
+让它把自己的 LED 操作方法（init、ctl）交给上层（leddrv.c）保存。
+
+2. open 接口
+static int led_drv_open(struct inode *node, struct file *file)
+{
+    int minor = iminor(node); // 获取次设备号（第几个LED）
+    p_led_opr->init(minor);
+}
+作用：当应用程序调用 open ("/dev/led0") 时，内核就会自动调用这个函数。
+目的：初始化对应 LED 的引脚。
+struct inode *node （第一个参数，超级重要）
+inode：内核里表示文件的实体信息
+里面包含：设备号（主设备号 + 次设备号）
+我们就是靠它知道打开的是 led0 还是 led1
+5. struct file *file （第二个参数）
+file：表示打开的文件句柄
+记录文件状态、偏移量等
+LED 驱动这里暂时用不到它
+int minor = iminor(node);
+1. iminor(node)
+内核宏
+作用：从 node 里面取出次设备号（minor number）
+2. minor 是什么？
+/dev/led0 → minor = 0
+/dev/led1 → minor = 1
+/dev/led2 → minor = 2
+一句话：minor = 第几盏 LED
+第三行：调用 LED 初始化函数
+p_led_opr->init(minor);
+1. p_led_opr
+之前讲过：
+保存了下层驱动传来的操作函数指针
+来自：
+register_led_operations(&board_demo_led_opr);
+2. ->init
+调用LED 初始化函数
+也就是 chip_demo_gpio.c 里的：
+board_demo_led_init(int which);
+3. minor
+传给 init 函数
+告诉它：初始化第几盏 LED
+
+
+
+3. write 接口
+static ssize_t led_drv_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
+{
+    char val;
+    copy_from_user(&val, buf, 1);
+    int minor = iminor(file->f_inode);
+    p_led_opr->ctl(minor, val);
+}
+这是 应用程序 write 数据时，内核自动调用的函数
+作用只有一个：
+把应用层传过来的 1/0，交给底层驱动去点灯 / 灭灯
+我保证你看完彻底通透！
+这是 Linux 驱动标准 write 函数格式，4 个参数固定死
+【参数 1】struct file *file
+表示当前打开的文件
+里面包含：
+设备号
+文件状态
+偏移量
+我们用它来获取是哪个 LED
+【参数 2】const char __user *buf
+最关键！
+应用程序传过来的数据缓冲区指针
+注意：
+这个地址是用户空间的，内核不能直接访问！
+必须用 copy_from_user 复制
+应用程序传的是：
+1 → 亮
+0 → 灭
+【参数 3】size_t len
+应用程序想写多少字节
+我们点灯只需要 1 字节，所以只取 1 个字节
+【参数 4】loff_t *off
+文件偏移量指针
+点灯驱动用不到，不管它
+第二行
+char val;
+定义一个变量
+用来保存从应用层拿到的 1 或 0
+第三行（最关键）
+copy_from_user(&val, buf, 1);
+作用：
+把用户空间的数据，复制到内核空间
+三个参数：
+&val
+→ 内核里的目的地
+buf
+→ 用户空间传来的数据指针
+1
+→ 复制 1 字节
+结果：
+应用传 1 → val = 1
+应用传 0 → val = 0
+第四行
+int minor = iminor(file->f_inode);
+作用：
+获取当前操作的是第几个 LED
+解释：
+file->f_inode
+从 file 结构体里拿到 inode
+iminor(...)
+取出次设备号
+led0 → minor=0
+led1 → minor=1
+第五行（真正干活）
+p_led_opr->ctl(minor, val);
+作用：
+调用底层驱动，控制 LED 亮 / 灭
+两个参数：
+minor
+→ 第几个 LED
+val
+→ 1 = 亮，0 = 灭
+
+
+
+
+
+
