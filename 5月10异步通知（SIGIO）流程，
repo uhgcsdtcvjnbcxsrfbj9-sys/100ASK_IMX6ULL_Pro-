@@ -1,0 +1,133 @@
+APP 打开设备节点，拿到 fd
+APP 注册 SIGIO 信号处理函数
+APP 告诉内核：信号发给我自己（PID）
+APP 开启异步通知（设置 FASYNC 标志）
+驱动的 fasync 函数被调用，把 APP 挂到异步链表
+APP 去做自己的事，不用等数据
+按键按下，触发驱动中断
+中断里调用 kill_fasync，给 APP 发 SIGIO 信号
+APP 收到信号，被内核打断当前代码
+自动执行你注册的信号处理函数
+在函数里 read 读取按键数据
+处理完数据，APP 回到原来的代码继续跑
+
+① APP 打开设备节点
+fd = open("/dev/mykey", O_RDWR);
+和之前 poll 流程一样：
+APP 打开 /dev/mykey，内核找到对应的按键驱动，执行 drv_open
+内核把 APP 和驱动绑定，拿到文件描述符 fd
+② APP 注册 SIGIO 信号处理函数
+signal(SIGIO, func);
+告诉内核：以后我收到 SIGIO 信号，就自动执行 func 这个函数
+你写的 func 里，一般就放 read(fd, &key_val, 4); 读数据的代码
+③ APP 告诉内核：“有数据时，给我发信号！”
+fcntl(fd, F_SETOWN, getpid());
+getpid() 拿到 APP 自己的进程 ID（PID）
+F_SETOWN 告诉内核：“这个文件的异步信号，要发给 PID 为 getpid() 的进程（就是我自己）”
+注意：这一步不直接调用驱动，只是在内核文件系统里记录 “谁要收信号”
+④~⑤ APP 设置异步通知标志
+// ④ 先读取当前的文件标志
+int flags = fcntl(fd, F_GETFL);
+// ⑤ 设置 FASYNC 位，开启异步通知
+fcntl(fd, F_SETFL, flags | FASYNC);
+FASYNC 是 “异步通知使能位”，设为 1 时，内核会给驱动发通知
+这一步会触发驱动里的 .fasync 函数（图里的⑥）
+⑥~⑦ 驱动处理 FASYNC：建立异步通知链表
+驱动里必须实现 drv_fasync 函数，伪代码：
+static struct fasync_struct *button_async;
+static int drv_fasync(int fd, struct file *filp, int on)
+{
+    // 内核提供的辅助函数，帮你管理异步通知链表
+    return fasync_helper(fd, filp, on, &button_async);
+}
+fasync_helper 是内核帮你封装好的工具函数
+它会把 APP 的 filp（文件结构体，里面存着之前设置的 PID）挂到 button_async 这个链表上
+作用：以后驱动要发信号时，直接从这个链表找对应的 APP 进程
+⑧ APP 可以做其他事了！
+现在异步通知已经配置完成，APP 不用阻塞等数据了
+可以跑循环、做其他任务，不用管驱动有没有数据
+⑨~⑩ 按键按下：驱动中断服务程序发信号
+当你按下按键，硬件触发中断，驱动的中断服务程序执行：
+static irqreturn_t gpio_key_irq(int irq, void *dev_id)
+{
+    // 1. 读取按键值
+    read_key();
+    // 2. 给APP发SIGIO信号
+    kill_fasync(&button_async, SIGIO, POLL_IN);
+    return IRQ_HANDLED;
+}
+kill_fasync 是内核提供的函数，它会遍历 button_async 链表，找到之前挂上去的 APP 进程
+给 APP 发送 SIGIO 信号，同时附带 POLL_IN 表示 “数据可读”
+⑪~⑬ APP 收到信号，自动执行处理函数
+APP 正在跑自己的代码，突然收到 SIGIO 信号
+内核会暂停 APP 当前的代码，自动调用你之前注册的 func 函数
+你在 func 里调用 read(fd, &key_val, 4); 读取按键数据
+读完之后，APP 回到之前被打断的地方，继续跑自己的代码
+
+
+
+
+
+
+
+我给你100% 彻底讲透这行代码：
+fd = open("/dev/mykey", O_RDWR);
+不讲虚的，不讲概念，只讲底层到底发生了什么！
+你看完这一段，驱动、设备节点、APP、内核、文件描述符 就全部打通了！
+一、先给你一句终极结论
+这行代码 = APP 跟内核说：我要连接 /dev/mykey 这个驱动，以后我所有操作都找它！
+内核收到后，会做一大堆事，最终给你返回一个数字 fd。
+二、底层真正做的 7 件事（一步一步讲清楚）
+1. 解析路径：/dev/mykey 是什么？
+内核去文件系统查：
+plaintext
+/dev/mykey
+发现它不是普通文件，而是一个 字符设备文件（c 开头）。
+内核立刻知道：
+这是一个驱动的入口！
+2. 取出设备号：主设备号 + 次设备号
+/dev/mykey 里面藏着两个号码：
+主设备号（major）：表示哪一类驱动
+次设备号（minor）：表示这类驱动里的第几个设备
+内核拿到这两个号，就像拿到了驱动的身份证。
+3. 内核通过主设备号 → 找到你的驱动
+内核里面有一张全局表：
+plaintext
+主设备号  →  对应的驱动结构体
+比如：
+plaintext
+250  →  mykey_driver（你写的按键驱动）
+内核瞬间找到：哦，你要找的是这个驱动！
+4. 调用你驱动里的 open 函数
+内核找到驱动后，直接调用你写的 drv_open 函数！
+static int drv_open(struct inode *inode, struct file *file)
+{
+    // 你自己写的初始化代码
+    printk("驱动被打开了!\n");
+    return 0;
+}
+✅ 这就是为什么 APP 一 open，驱动的 open 就会执行！
+5. 内核创建一个 struct file 结构体
+内核会在内部创建一个结构体：
+plaintext
+struct file
+这个结构体非常重要，它代表：
+APP 与驱动之间的一条连接通道
+里面保存：
+驱动信息
+当前状态
+异步通知 PID
+等待队列
+etc...
+6. 把 struct file 与你的驱动绑定
+plaintext
+struct file  ←→  你的驱动
+从此以后：
+APP 操作这个文件 = 操作你的驱动
+read → 调用 drv_read
+poll → 调用 drv_poll
+fasync → 调用 drv_fasync
+7. 内核返回一个数字给 APP → 就是 fd
+plaintext
+fd = 3
+fd 就是一个数字编号，内核用它来找到刚才创建的 struct file。
