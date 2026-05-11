@@ -1,0 +1,77 @@
+一、阶段 1：驱动调用 request_threaded_irq → 内核初始化（注册阶段）
+这一步是你写驱动时主动调用的，发生在模块初始化或设备探测函数里，只执行一次。
+1. 驱动侧：调用注册接口
+request_threaded_irq(
+    irq,         // 中断号（比如GPIO的中断号）
+    handler,     // 上半部函数（可空）
+    thread_fn,   // 下半部线程函数
+    flags,       // 中断触发方式/标志
+    name,        // 中断名称
+    dev_id       // 设备上下文指针
+);
+2. 内核侧：分配并初始化 struct irqaction
+// 内核源码逻辑
+struct irqaction *action = kzalloc(sizeof(*action), GFP_KERNEL);
+action->handler = handler;
+action->thread_fn = thread_fn;
+action->flags = flags;
+action->name = name;
+action->dev_id = dev_id;
+这个 action 结构体，是你中断处理的 “信息载体”，内核后面所有操作都围绕它展开。
+3. 内核侧：调用 __setup_irq，把 action 挂到 irq_desc 链表
+每个中断号都对应一个 struct irq_desc 描述符，内核用数组管理所有中断。
+__setup_irq 会把你分配的 irqaction，挂到对应 irq_desc->action 的链表上；
+如果 thread_fn 不为空，就调用 setup_irq_thread，为它创建内核线程。
+4. 内核侧：setup_irq_thread 创建中断内核线程
+if (!secondary) {
+    t = kthread_create(irq_thread, new, "irq/%d-%s", irq, new->name);
+}
+new->thread = t;
+线程入口固定为内核的 irq_thread 函数，而不是你写的 thread_fn；
+线程名字是 irq/[中断号]-[你的设备名]，你可以用 ps aux | grep irq 看到；
+线程创建后默认处于睡眠状态，不占用 CPU，等待被中断唤醒。
+✅ 注册阶段完成：中断号绑定了处理函数，内核线程也准备好了，只等硬件触发中断。
+
+
+
+二、阶段 2：硬件触发中断 → 上半部执行（中断上下文）
+当外设（比如 GPIO 按键）触发中断后，CPU 立刻响应，进入中断上下文执行以下流程：
+1. 硬件响应：CPU 跳转到中断向量表，进入通用中断处理
+不同架构略有差异，比如 ARM 是 __irq_usr → generic_handle_irq_desc，x86 是类似的流程，最终都会进入 __handle_irq_event_percpu 函数。
+2. 遍历 irq_desc 上的 irqaction，调用你的上半部 handler
+
+// __handle_irq_event_percpu 核心逻辑
+for_each_action_of_desc(desc, action) {
+    res = action->handler(irq, action->dev_id); // 调用你写的handler
+}
+这里执行的是你注册的 handler 函数，处于中断上下文；
+要求：执行时间必须极短，不能睡眠，只能做紧急操作（比如清中断标志、读状态寄存器）。
+3. 根据 handler 的返回值，决定后续动作
+handler 有两个关键返回值：
+返回 IRQ_HANDLED：表示中断已处理完毕，不需要唤醒线程，流程直接结束；
+返回 IRQ_WAKE_THREAD：表示上半部处理完了，需要唤醒内核线程执行下半部。
+三、阶段 3：内核线程被唤醒 → 执行 thread_fn（进程上下文）
+当 handler 返回 IRQ_WAKE_THREAD 时，内核会调用 __irq_wake_thread(desc, action)，把之前创建的 irq_thread 线程唤醒，进入线程执行流程。
+1. 线程入口：内核 irq_thread 函数开始执行
+while (!irq_wait_for_interrupt(action)) {
+    // 1. 等待中断唤醒（平时在这里睡眠）
+    // 2. 被唤醒后，执行线程处理函数
+    action_ret = handler_fn(desc, action); // 这里调用你写的thread_fn
+    // 3. 通知等待线程，处理完成
+    wake_threads_waitq(desc);
+}
+2. 执行你写的 thread_fn 函数
+这里处于进程上下文（内核线程上下文），和用户进程的上下文是一样的；
+你可以在这里做任何复杂操作：
+可以睡眠（比如调用 msleep、kmalloc 带 GFP_KERNEL 标志）；
+可以调用信号量、互斥锁；
+可以和用户态进程通信（比如 copy_to_user）；
+可以做耗时的硬件操作（比如 SPI/I2C 传输、数据处理）。
+3. thread_fn 执行完毕，线程再次进入睡眠
+thread_fn 返回后，内核 irq_thread 函数会回到 irq_wait_for_interrupt(action)；
+线程再次进入睡眠状态，等待下一次中断触发唤醒。
+四、阶段 4：驱动卸载 / 设备注销 → 释放中断资源
+当模块卸载或设备注销时，你需要调用 free_irq(irq, dev_id)，内核会执行以下操作：
+从 irq_desc 的链表上移除 irqaction；
+唤醒并销毁对应的内核线程；
+释放 irqaction 结构体占用的内存。
