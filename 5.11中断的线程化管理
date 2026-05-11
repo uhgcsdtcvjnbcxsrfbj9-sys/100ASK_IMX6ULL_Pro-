@@ -1,0 +1,82 @@
+、先搞懂：request_threaded_irq 是干嘛的？
+它是 Linux 内核里带线程的中断注册函数，核心作用是把中断分成两部分处理：
+上半部（handler）：中断触发时立刻执行，必须快、短，只做紧急处理（比如读寄存器、清中断标志）。
+下半部（thread_fn）：放到内核线程里异步执行，可以慢、复杂，能睡眠、能调用复杂函数，解决传统中断上下文不能睡眠的问题。
+request_threaded_irq(
+    unsigned int irq,         // 要注册的中断号
+    irq_handler_t handler,    // 上半部中断处理函数（可以为NULL）
+    irq_handler_t thread_fn,  // 下半部线程处理函数
+    unsigned long flags,      // 中断标志（比如IRQF_TRIGGER_*）
+    const char *name,         // 中断名字（/proc/interrupts里能看到）
+    void *dev);               // 传给handler和thread_fn的设备上下文
+
+
+
+    二、调用 request_threaded_irq 后，内核里发生了什么？
+1. 关键数据结构：struct irq_desc + struct irqaction
+struct irq_desc：每个中断号对应一个，内核用数组管理所有中断，是中断的 “描述符”。
+struct irqaction：你注册的中断处理信息都存在这里，是 “中断动作” 的载体。
+你调用 request_threaded_irq 时，内核会：
+分配一个 struct irqaction；
+把你传的 handler、thread_fn、flags、name、dev 都存进去；
+把这个 irqaction 挂到对应 irq_desc 的链表上；
+调用 setup_irq_thread，为 thread_fn 创建一个内核线程。
+
+
+2. 线程是怎么创建的？
+看源码里的关键部分：
+// request_threaded_irq 里的核心逻辑
+action = kzalloc(sizeof(struct irqaction), GFP_KERNEL);
+action->handler = handler;
+action->thread_fn = thread_fn;
+// ... 其他成员赋值
+retval = __setup_irq(irq, desc, action);
+__setup_irq 会调用 setup_irq_thread，里面的关键代码：
+if (!secondary) {
+    t = kthread_create(irq_thread, new, "irq/%d-%s", irq, new->name);
+} else {
+    t = kthread_create(irq_thread, new, "irq/%d-s-%s", irq, new->name);
+}
+new->thread = t;
+用 kthread_create 创建了一个内核线程，线程入口是 irq_thread；
+线程名字格式是 irq/[中断号]-[名字]，你在 ps 或 top 里能看到；
+线程创建后默认处于睡眠状态，不会占用 CPU，只有中断触发后才会被唤醒。
+
+
+
+三、中断的完整执行流程（从触发到结束）
+1. 第一步：硬件触发中断 → 上半部 handler 执行
+当外设触发中断后，CPU 会进入中断上下文，执行 __handle_irq_event_percpu 函数，核心逻辑：
+res = action->handler(irq, action->dev_id);
+这里调用的就是你注册的上半部 handler 函数，有两种返回值：
+IRQ_HANDLED：表示中断已经处理完，不需要唤醒线程，流程直接结束；
+IRQ_WAKE_THREAD：表示上半部处理完了，需要唤醒线程执行下半部 thread_fn。
+2. 第二步：如果返回 IRQ_WAKE_THREAD，唤醒内核线程
+内核会调用 __irq_wake_thread(desc, action)，把之前创建的 irq_thread 线程唤醒，线程开始运行。
+3. 第三步：内核线程 irq_thread 执行下半部 thread_fn
+线程的核心逻辑在 irq_thread 函数里：
+while (!irq_wait_for_interrupt(action)) {
+    irq_thread_check_affinity(desc, action);
+
+    // 执行你注册的 thread_fn
+    action_ret = handler_fn(desc, action);
+    if (action_ret == IRQ_HANDLED)
+        atomic_inc(&desc->threads_handled);
+    if (action_ret == IRQ_WAKE_THREAD)
+        irq_wake_secondary(desc, action);
+
+    wake_threads_waitq(desc);
+}
+拆解一下：
+irq_wait_for_interrupt(action)：线程平时在这里睡眠，等待被中断唤醒；
+被唤醒后，调用 handler_fn，也就是你注册的 thread_fn；
+thread_fn 执行时处于进程上下文，可以睡眠、调用 kmalloc、使用信号量等，这是和上半部最大的区别；
+执行完后，线程再次进入睡眠，等待下一次中断唤醒。
+
+
+五、为什么要用 request_threaded_irq？
+传统的 request_irq 注册的中断处理函数只能在中断上下文执行，不能睡眠，很多复杂操作做不了。
+而 request_threaded_irq 解决了这个痛点：
+上半部做 “紧急处理”，快速退出；
+下半部放到内核线程里做 “耗时处理”，能睡眠、能调用复杂函数；
+多核系统下，线程可以绑定到指定 CPU，提升并行处理效率。
